@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<title>Plate Scanner</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22e6; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #9aa3b2; --accent: #4da3ff; --ok: #3ddc84; --warn: #ffb347; --err: #ff6b6b;
+    --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+               font: 15px/1.4 system-ui, -apple-system, sans-serif; }
+
+  #stage { position: fixed; inset: 0; background: #000; }
+  #video { width: 100%; height: 100%; object-fit: cover; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  #hud { position: fixed; top: 0; left: 0; right: 0; padding: calc(var(--safe-top) + 8px) 12px 8px;
+         display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted);
+         background: linear-gradient(#000c, #0000); pointer-events: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; display: inline-block; margin-right: 4px; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.err { background: var(--err); }
+  #hud .spacer { flex: 1; }
+
+  #toasts { position: fixed; top: calc(var(--safe-top) + 44px); left: 12px; right: 12px; z-index: 30;
+            display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+           border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px); font-size: 13px;
+           animation: slidein .25s ease; }
+  .toast.seen { border-left-color: var(--warn); }
+  .toast.new  { border-left-color: var(--ok); }
+  .toast b { font-size: 15px; letter-spacing: .06em; }
+  .toast .rows { color: var(--muted); margin-top: 4px; font-size: 12px; }
+  .toast.fadeout { transition: opacity .4s; opacity: 0; }
+  @keyframes slidein { from { transform: translateY(-8px); opacity: 0; } }
+
+  #controls { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+              padding: 10px 12px calc(var(--safe-bottom) + 12px);
+              display: flex; gap: 10px; background: linear-gradient(#0000, #000c); }
+  button { border: 1px solid var(--border); background: var(--panel); color: var(--text);
+           border-radius: 12px; padding: 12px 14px; font-size: 15px; font-weight: 600;
+           backdrop-filter: blur(8px); }
+  #startBtn { flex: 2; background: var(--accent); color: #06213c; border: 0; }
+  #startBtn.stop { background: var(--err); color: #fff; }
+  #settingsBtn, #listBtn { flex: 1; }
+
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; max-height: 75%;
+           background: #14171d; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0;
+           padding: 16px 16px calc(var(--safe-bottom) + 16px); overflow-y: auto;
+           transform: translateY(105%); transition: transform .25s ease; }
+  .sheet.open { transform: translateY(0); }
+  .sheet h2 { margin: 0 0 12px; font-size: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .sheet h2 button { padding: 6px 12px; font-size: 13px; }
+  .field { margin: 12px 0; }
+  .field label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+  .field input[type=number] { width: 110px; background: #0d0f13; color: var(--text); border: 1px solid var(--border);
+                              border-radius: 8px; padding: 8px; font-size: 15px; }
+  .field input[type=range] { width: 100%; }
+  .field .val { color: var(--accent); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 6px 6px; text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  td.plate { font-weight: 700; letter-spacing: .05em; }
+  .rowbtns { display: flex; gap: 8px; margin-top: 12px; }
+  .rowbtns button { flex: 1; font-size: 13px; padding: 10px; }
+  #status { position: fixed; bottom: calc(var(--safe-bottom) + 74px); left: 12px; right: 12px; z-index: 10;
+            text-align: center; font-size: 12px; color: var(--muted); text-shadow: 0 1px 2px #000; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="hud">
+  <span><span class="dot" id="dotModel"></span>model</span>
+  <span><span class="dot" id="dotCam"></span>camera</span>
+  <span><span class="dot" id="dotGps"></span>gps</span>
+  <span class="spacer"></span>
+  <span id="perf"></span>
+</div>
+
+<div id="toasts"></div>
+<div id="status">Tap Start to load models and open the camera.</div>
+
+<div id="controls">
+  <button id="startBtn">▶ Start</button>
+  <button id="settingsBtn">⚙︎</button>
+  <button id="listBtn">☰</button>
+</div>
+
+<!-- ============ settings sheet ============ -->
+<div class="sheet" id="settingsSheet">
+  <h2>Settings <button data-close>Done</button></h2>
+  <div class="field">
+    <label>Ignore repeat sightings of the same plate within (minutes)</label>
+    <input type="number" id="setDedupMin" min="0" step="1" value="60">
+  </div>
+  <div class="field">
+    <label>Detection score threshold: <span class="val" id="setScoreVal">0.35</span></label>
+    <input type="range" id="setScore" min="0.10" max="0.90" step="0.05" value="0.35">
+  </div>
+  <div class="field">
+    <label>Min OCR character confidence: <span class="val" id="setOcrConfVal">0.50</span></label>
+    <input type="range" id="setOcrConf" min="0.10" max="0.95" step="0.05" value="0.50">
+  </div>
+  <div class="field">
+    <label>Confirmations needed before logging (consecutive frames with same read)</label>
+    <input type="number" id="setConfirm" min="1" max="10" step="1" value="2">
+  </div>
+  <div class="field">
+    <label>Toast duration (seconds)</label>
+    <input type="number" id="setToastSec" min="2" max="30" step="1" value="6">
+  </div>
+</div>
+
+<!-- ============ sightings sheet ============ -->
+<div class="sheet" id="listSheet">
+  <h2>Sightings <span><span id="dbCount" style="color:var(--muted);font-size:12px;margin-right:10px"></span><button data-close>Done</button></span></h2>
+  <div id="listWrap">Loading…</div>
+  <div class="rowbtns">
+    <button id="exportBtn">Export CSV</button>
+    <button id="clearBtn" style="color:var(--err)">Delete all</button>
+  </div>
+</div>
+
+<script type="module">
+// ---------------- LiteRT.js loading (local first, CDN fallback) ----------------
+let loadLiteRt, loadAndCompile, Tensor, WASM_PATH;
+try {
+  ({ loadLiteRt, loadAndCompile, Tensor } = await import('./node_modules/@litertjs/core/dist/index.js'));
+  WASM_PATH = './node_modules/@litertjs/core/wasm/';
+} catch {
+  ({ loadLiteRt, loadAndCompile, Tensor } = await import('https://cdn.jsdelivr.net/npm/@litertjs/core/+esm'));
+  WASM_PATH = 'https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/';
+}
+const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+const say = msg => { statusEl.textContent = msg; };
+const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
+
+// ---------------- settings (persisted) ----------------
+const SETTINGS_KEY = 'alpr-scanner-settings';
+const settings = Object.assign({
+  dedupMin: 60, score: 0.35, ocrConf: 0.5, confirm: 2, toastSec: 6,
+}, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
+function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
+
+$('setDedupMin').value = settings.dedupMin;
+$('setScore').value = settings.score;       $('setScoreVal').textContent = settings.score.toFixed(2);
+$('setOcrConf').value = settings.ocrConf;   $('setOcrConfVal').textContent = settings.ocrConf.toFixed(2);
+$('setConfirm').value = settings.confirm;
+$('setToastSec').value = settings.toastSec;
+$('setDedupMin').onchange = e => { settings.dedupMin = Math.max(0, +e.target.value || 0); saveSettings(); };
+$('setScore').oninput = e => { settings.score = +e.target.value; $('setScoreVal').textContent = settings.score.toFixed(2); saveSettings(); };
+$('setOcrConf').oninput = e => { settings.ocrConf = +e.target.value; $('setOcrConfVal').textContent = settings.ocrConf.toFixed(2); saveSettings(); };
+$('setConfirm').onchange = e => { settings.confirm = Math.max(1, +e.target.value || 1); saveSettings(); };
+$('setToastSec').onchange = e => { settings.toastSec = Math.max(2, +e.target.value || 6); saveSettings(); };
+
+for (const sheet of document.querySelectorAll('.sheet')) {
+  sheet.querySelector('[data-close]').onclick = () => sheet.classList.remove('open');
+}
+$('settingsBtn').onclick = () => { $('listSheet').classList.remove('open'); $('settingsSheet').classList.toggle('open'); };
+$('listBtn').onclick = async () => { $('settingsSheet').classList.remove('open'); $('listSheet').classList.toggle('open'); if ($('listSheet').classList.contains('open')) renderList(); };
+
+// ---------------- IndexedDB ----------------
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('alpr', 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      const store = db.createObjectStore('sightings', { keyPath: 'id', autoIncrement: true });
+      store.createIndex('plate', 'plate');
+      store.createIndex('ts', 'ts');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+const dbPromise = openDb();
+
+function tx(mode, fn) {
+  return dbPromise.then(db => new Promise((resolve, reject) => {
+    const t = db.transaction('sightings', mode);
+    const out = fn(t.objectStore('sightings'));
+    t.oncomplete = () => resolve(out.result ?? out);
+    t.onerror = () => reject(t.error);
+  }));
+}
+const addSighting = s => tx('readwrite', st => st.add(s));
+const getByPlate = plate => tx('readonly', st => st.index('plate').getAll(plate))
+  .then(rows => rows.sort((a, b) => b.ts - a.ts));
+const getRecent = (limit = 100) => tx('readonly', st => st.getAll())
+  .then(rows => rows.sort((a, b) => b.ts - a.ts).slice(0, limit));
+const countAll = () => tx('readonly', st => st.count());
+const clearAll = () => tx('readwrite', st => st.clear());
+
+// exposed for debugging / automated tests
+window.alprDb = { addSighting, getByPlate, getRecent, countAll, clearAll };
+
+// ---------------- GPS ----------------
+let lastPos = null;   // {lat, lon, accuracy, ts}
+function startGps() {
+  if (!navigator.geolocation) { setDot('dotGps', 'err'); return; }
+  navigator.geolocation.watchPosition(
+    p => { lastPos = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, ts: Date.now() }; setDot('dotGps', 'ok'); },
+    () => setDot('dotGps', 'warn'),
+    { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 });
+}
+const currentPos = () => (lastPos && Date.now() - lastPos.ts < 5 * 60 * 1000) ? lastPos : null;
+
+// ---------------- toasts ----------------
+const fmtDate = ts => new Date(ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+const fmtLoc = s => (s.lat != null) ? `${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}` : 'no location';
+function toast(kind, title, rows) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.innerHTML = `<b>${title}</b>` + (rows?.length ? `<div class="rows">${rows.join('<br>')}</div>` : '');
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.classList.add('fadeout'); setTimeout(() => el.remove(), 450); }, settings.toastSec * 1000);
+}
+
+// ---------------- models ----------------
+const DET_CANDIDATES = ['./yolox_plates_s_float16.tflite', './yolox_plates_s_float32.tflite'];
+const OCR_CANDIDATES = ['./cct_s_v2_global_float16.tflite', './cct_s_v2_global_float32.tflite', './cct_s_ocr_float32.tflite'];
+const OCR_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_';
+let detModel = null, detSpec = null;   // {layout, w, h}
+let ocrModel = null, ocrSpec = null;   // {w, h, c, slots}
+
+async function loadModels() {
+  say('Loading LiteRT runtime…');
+  await loadLiteRt(WASM_PATH, hasJspi ? { jspi: true } : undefined);
+
+  say('Loading detector…');
+  // detector: webgpu only when JSPI exists (readback needs it); OCR always wasm
+  const accels = hasJspi ? ['webgpu', 'wasm'] : ['wasm'];
+  outer: for (const cand of DET_CANDIDATES) {
+    for (const accel of accels) {
+      try { detModel = await loadAndCompile(cand, { accelerator: accel }); break outer; } catch {}
+    }
+  }
+  if (!detModel) throw new Error('No detector model found (yolox_plates_s_*.tflite)');
+  const ds = detModel.getInputDetails()[0].shape;
+  detSpec = ds[1] === 3 ? { layout: 'nchw', h: ds[2], w: ds[3] } : { layout: 'nhwc', h: ds[1], w: ds[2] };
+
+  say('Loading OCR…');
+  for (const cand of OCR_CANDIDATES) {
+    try { ocrModel = await loadAndCompile(cand, { accelerator: 'wasm' }); break; } catch {}
+  }
+  if (!ocrModel) throw new Error('No OCR model found (cct_*.tflite)');
+  const oi = ocrModel.getInputDetails()[0];
+  const plateOut = ocrModel.getOutputDetails().find(o => o.shape[o.shape.length - 1] === OCR_ALPHABET.length);
+  ocrSpec = { h: oi.shape[1], w: oi.shape[2], c: oi.shape[3], slots: plateOut.shape[1] };
+  setDot('dotModel', 'ok');
+}
+
+// ---------------- detection (same decode as alpr-demo.html) ----------------
+const detCanvas = document.createElement('canvas');
+let grids = null;
+function buildGrids() {
+  grids = [];
+  for (const s of [8, 16, 32]) {
+    const gw = detSpec.w / s, gh = detSpec.h / s;
+    for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) grids.push([gx, gy, s]);
+  }
+}
+
+async function detect(frameCanvas) {
+  const { w: W, h: H, layout } = detSpec;
+  if (!grids) buildGrids();
+  detCanvas.width = W; detCanvas.height = H;
+  const ctx = detCanvas.getContext('2d', { willReadFrequently: true });
+  const r = Math.min(W / frameCanvas.width, H / frameCanvas.height);
+  ctx.fillStyle = 'rgb(114,114,114)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(frameCanvas, 0, 0, Math.round(frameCanvas.width * r), Math.round(frameCanvas.height * r));
+  const { data: px } = ctx.getImageData(0, 0, W, H);
+  const n = W * H;
+  const inp = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    if (layout === 'nchw') { inp[i] = px[i * 4]; inp[n + i] = px[i * 4 + 1]; inp[2 * n + i] = px[i * 4 + 2]; }
+    else { inp[i * 3] = px[i * 4]; inp[i * 3 + 1] = px[i * 4 + 1]; inp[i * 3 + 2] = px[i * 4 + 2]; }
+  }
+  const t = new Tensor(inp, layout === 'nchw' ? [1, 3, H, W] : [1, H, W, 3]);
+  const outs = await detModel.run(t);
+  const list = Array.isArray(outs) ? outs : Object.values(outs);
+  const cpu = await list[0].moveTo('wasm');
+  const y = cpu.toTypedArray();          // [8400, 6]
+  try { t.delete(); } catch {}
+  list.forEach(x => { try { x.delete(); } catch {} });
+
+  const cands = [];
+  const N = grids.length;
+  for (let i = 0; i < N; i++) {
+    const score = y[i * 6 + 4] * y[i * 6 + 5];
+    if (score < settings.score) continue;
+    const [gx, gy, s] = grids[i];
+    const cx = (y[i * 6] + gx) * s, cy = (y[i * 6 + 1] + gy) * s;
+    const w = Math.exp(y[i * 6 + 2]) * s, h = Math.exp(y[i * 6 + 3]) * s;
+    cands.push({ score, x1: (cx - w / 2) / r, y1: (cy - h / 2) / r, x2: (cx + w / 2) / r, y2: (cy + h / 2) / r });
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const keep = [];
+  for (const b of cands) {
+    let ok = true;
+    for (const k of keep) {
+      const ix = Math.max(0, Math.min(b.x2, k.x2) - Math.max(b.x1, k.x1));
+      const iy = Math.max(0, Math.min(b.y2, k.y2) - Math.max(b.y1, k.y1));
+      const inter = ix * iy;
+      const uni = (b.x2 - b.x1) * (b.y2 - b.y1) + (k.x2 - k.x1) * (k.y2 - k.y1) - inter;
+      if (inter / (uni + 1e-9) > 0.45) { ok = false; break; }
+    }
+    if (ok) keep.push(b);
+    if (keep.length >= 4) break;      // at most 4 plates per frame
+  }
+  return keep;
+}
+
+// ---------------- OCR (same as alpr-demo.html, generic) ----------------
+const ocrCanvas = document.createElement('canvas');
+async function runOcr(frameCanvas, d) {
+  const { w: W, h: H, c: C, slots } = ocrSpec;
+  ocrCanvas.width = W; ocrCanvas.height = H;
+  const mw = (d.x2 - d.x1) * 0.1, mh = (d.y2 - d.y1) * 0.1;
+  const cx1 = Math.max(0, d.x1 - mw), cy1 = Math.max(0, d.y1 - mh);
+  const cx2 = Math.min(frameCanvas.width, d.x2 + mw), cy2 = Math.min(frameCanvas.height, d.y2 + mh);
+  const ctx = ocrCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(frameCanvas, cx1, cy1, cx2 - cx1, cy2 - cy1, 0, 0, W, H);
+  const { data: px } = ctx.getImageData(0, 0, W, H);
+  const inp = new Float32Array(W * H * C);
+  for (let i = 0; i < W * H; i++) {
+    if (C === 1) inp[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+    else { inp[i * 3] = px[i * 4]; inp[i * 3 + 1] = px[i * 4 + 1]; inp[i * 3 + 2] = px[i * 4 + 2]; }
+  }
+  const t = new Tensor(inp, [1, H, W, C]);
+  const outs = await ocrModel.run(t);
+  const list = Array.isArray(outs) ? outs : Object.values(outs);
+  let probs = null;
+  for (const out of list) {
+    const cpu = await out.moveTo('wasm');
+    const arr = cpu.toTypedArray();
+    if (arr.length === slots * OCR_ALPHABET.length) probs = arr;
+  }
+  try { t.delete(); } catch {}
+  list.forEach(x => { try { x.delete(); } catch {} });
+  if (!probs) return { text: '', conf: 0 };
+  let text = '';
+  const confs = [];
+  for (let s = 0; s < slots; s++) {
+    let bi = 0, bv = -Infinity;
+    for (let c = 0; c < OCR_ALPHABET.length; c++) {
+      const v = probs[s * OCR_ALPHABET.length + c];
+      if (v > bv) { bv = v; bi = c; }
+    }
+    if (OCR_ALPHABET[bi] !== '_') { text += OCR_ALPHABET[bi]; confs.push(bv); }
+  }
+  return { text, conf: confs.length ? Math.min(...confs) : 0 };
+}
+
+// ---------------- sighting logic ----------------
+const confirmCounts = new Map();    // plate -> consecutive confirmations
+const recentToast = new Map();      // plate -> last toast ts (anti-spam)
+const recentLogged = new Map();     // plate -> last handled ts (in-memory fast path)
+
+async function handleConfirmedPlate(plate) {
+  const now = Date.now();
+  // in-memory throttle so we don't hammer the DB every frame for the plate in view
+  if (now - (recentLogged.get(plate) || 0) < 10_000) return;
+  recentLogged.set(plate, now);
+
+  const prior = await getByPlate(plate);
+  const dedupMs = settings.dedupMin * 60 * 1000;
+  const isDup = prior.length > 0 && (now - prior[0].ts) < dedupMs;
+
+  if (!isDup) {
+    const pos = currentPos();
+    await addSighting({ plate, ts: now, lat: pos?.lat ?? null, lon: pos?.lon ?? null, accuracy: pos?.accuracy ?? null });
+  }
+
+  if (prior.length > 0) {
+    if (now - (recentToast.get(plate) || 0) > 30_000) {
+      recentToast.set(plate, now);
+      const rows = prior.slice(0, 3).map(s => `${fmtDate(s.ts)} — ${fmtLoc(s)}`);
+      toast('seen', `${plate} — seen ${prior.length}× before${isDup ? ' (within window, not re-logged)' : ''}`, rows);
+    }
+  } else {
+    toast('new', `${plate} — new plate logged`, []);
+  }
+}
+
+// ---------------- camera + scan loop ----------------
+const video = $('video');
+const overlay = $('overlay');
+const frameCanvas = document.createElement('canvas');
+let running = false, stream = null, wakeLock = null;
+
+async function startCamera() {
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  setDot('dotCam', 'ok');
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+}
+function stopCamera() {
+  stream?.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  wakeLock?.release().catch(() => {});
+  setDot('dotCam', '');
+}
+
+function drawOverlay(dets) {
+  overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  ctx.font = `${Math.max(18, overlay.width / 40)}px system-ui`;
+  ctx.textBaseline = 'bottom';
+  ctx.lineWidth = Math.max(2, overlay.width / 400);
+  for (const d of dets) {
+    const good = d.text && d.conf >= settings.ocrConf;
+    ctx.strokeStyle = good ? '#3ddc84' : '#ffb347';
+    ctx.strokeRect(d.x1, d.y1, d.x2 - d.x1, d.y2 - d.y1);
+    if (d.text) {
+      const label = `${d.text} ${(d.conf * 100).toFixed(0)}%`;
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = good ? '#3ddc84' : '#ffb347';
+      ctx.fillRect(d.x1, d.y1 - parseInt(ctx.font) - 4, tw + 10, parseInt(ctx.font) + 4);
+      ctx.fillStyle = '#06213c';
+      ctx.fillText(label, d.x1 + 5, d.y1 - 2);
+    }
+  }
+}
+
+async function scanLoop() {
+  while (running) {
+    if (video.readyState < 2 || document.hidden) { await new Promise(r => setTimeout(r, 200)); continue; }
+    const t0 = performance.now();
+    frameCanvas.width = video.videoWidth; frameCanvas.height = video.videoHeight;
+    frameCanvas.getContext('2d', { willReadFrequently: true }).drawImage(video, 0, 0);
+
+    let dets = [];
+    try { dets = await detect(frameCanvas); } catch (e) { say('Detector error: ' + (e.message || e)); }
+    const seenThisFrame = new Set();
+    for (const d of dets) {
+      try {
+        const r = await runOcr(frameCanvas, d);
+        d.text = r.text; d.conf = r.conf;
+        if (r.text.length >= 4 && r.text.length <= 10 && r.conf >= settings.ocrConf) {
+          seenThisFrame.add(r.text);
+          const c = (confirmCounts.get(r.text) || 0) + 1;
+          confirmCounts.set(r.text, c);
+          if (c >= settings.confirm) handleConfirmedPlate(r.text).catch(console.error);
+        }
+      } catch (e) { say('OCR error: ' + (e.message || e)); }
+    }
+    for (const key of confirmCounts.keys()) if (!seenThisFrame.has(key)) confirmCounts.delete(key);
+
+    drawOverlay(dets);
+    const ms = performance.now() - t0;
+    $('perf').textContent = `${ms.toFixed(0)} ms/frame`;
+    await new Promise(r => setTimeout(r, 0));   // yield to UI
+  }
+  drawOverlay([]);
+}
+
+// ---------------- start/stop ----------------
+let modelsReady = false;
+$('startBtn').onclick = async () => {
+  if (running) {
+    running = false;
+    stopCamera();
+    $('startBtn').textContent = '▶ Start';
+    $('startBtn').classList.remove('stop');
+    say('Stopped.');
+    return;
+  }
+  try {
+    $('startBtn').disabled = true;
+    if (!modelsReady) { await loadModels(); modelsReady = true; }
+    startGps();
+    say('Opening camera…');
+    await startCamera();
+    running = true;
+    $('startBtn').textContent = '■ Stop';
+    $('startBtn').classList.add('stop');
+    say('Scanning…');
+    scanLoop();
+  } catch (e) {
+    console.error(e);
+    say('Failed: ' + (e.message || e));
+    setDot('dotModel', modelsReady ? 'ok' : 'err');
+    if (!video.srcObject) setDot('dotCam', 'err');
+  } finally {
+    $('startBtn').disabled = false;
+  }
+};
+
+document.addEventListener('visibilitychange', async () => {
+  if (!document.hidden && running && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  }
+});
+
+// ---------------- sightings list ----------------
+async function renderList() {
+  const rows = await getRecent(100);
+  $('dbCount').textContent = `${await countAll()} total`;
+  $('listWrap').innerHTML = rows.length
+    ? `<table><tr><th>plate</th><th>when</th><th>where</th></tr>` +
+      rows.map(s => `<tr><td class="plate">${s.plate}</td><td>${fmtDate(s.ts)}</td><td>${fmtLoc(s)}</td></tr>`).join('') +
+      `</table>`
+    : '<div style="color:var(--muted)">No sightings yet.</div>';
+}
+$('exportBtn').onclick = async () => {
+  const rows = await getRecent(100000);
+  const csv = 'plate,timestamp,iso_date,lat,lon,accuracy_m\n' + rows.map(s =>
+    `${s.plate},${s.ts},${new Date(s.ts).toISOString()},${s.lat ?? ''},${s.lon ?? ''},${s.accuracy?.toFixed(0) ?? ''}`).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `plates-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('clearBtn').onclick = async () => {
+  if (confirm('Delete ALL stored sightings?')) { await clearAll(); renderList(); }
+};
+
+// ---------------- service worker ----------------
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+say('Tap Start to load models and open the camera.');
+</script>
+</body>
+</html>
