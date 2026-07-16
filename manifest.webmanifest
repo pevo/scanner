@@ -2,7 +2,7 @@
   "name": "Plate Scanner",
   "short_name": "Plates",
   "description": "On-device license plate scanner (detection + OCR, no cloud)",
-  "start_url": "./scanner.html",
+  "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
