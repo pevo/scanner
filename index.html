@@ -4,7 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- STATUS BAR MODE — measured behavior on iOS 26.x (iPhone 15 Pro):
+     "black-translucent" (full-bleed) is BROKEN in the iOS 26 web-app container
+     (verified on 26.1 AND 26.5.2): the view is sized 59px short and anchored at
+     the screen top, leaving an unpaintable strip at the bottom (outside the
+     drawing surface — no CSS/JS can cover it; WebKit #301994 was the 26.1
+     variant). "black" (opaque) is the only config with no dead pixels: the view
+     sits below a black system status bar, flush to the screen bottom.
+     If a future iOS restores translucent full-bleed, switch this back to
+     "black-translucent" and reinstall the Home Screen app to test. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="theme-color" content="#000000">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
@@ -159,7 +168,7 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v2.6';
+const APP_VERSION = 'v2.10';
 const $ = id => document.getElementById(id);
 $('appVer').textContent = APP_VERSION;
 const statusEl = $('status');
@@ -176,13 +185,16 @@ function fitStage() {
   stage.style.height = target + 'px';
   // diagnostics (visible in Settings)
   const probe = document.createElement('div');
-  probe.style.cssText = 'position:fixed;padding-bottom:env(safe-area-inset-bottom,0px);visibility:hidden';
+  probe.style.cssText = 'position:fixed;padding-bottom:env(safe-area-inset-bottom,0px);padding-top:env(safe-area-inset-top,0px);visibility:hidden';
   document.body.appendChild(probe);
-  const saB = getComputedStyle(probe).paddingBottom;
+  const cs = getComputedStyle(probe);
+  const saB = cs.paddingBottom, saT = cs.paddingTop;
   probe.remove();
   $('diag').textContent =
     `${APP_VERSION} · viewport ${window.innerWidth}×${window.innerHeight} · screen ${screen.width}×${screen.height}` +
-    ` · stage→${target} · safe-bottom ${saB} · ${navigator.standalone ? 'standalone app' : 'browser tab'}`;
+    ` · stage→${target} · safe-top ${saT} · safe-bottom ${saB}` +
+    ` · screenY ${window.screenY} · vv ${Math.round(visualViewport?.height ?? -1)}` +
+    ` · ${navigator.standalone ? 'standalone app' : 'browser tab'}`;
 }
 fitStage();
 addEventListener('resize', fitStage);
