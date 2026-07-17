@@ -86,7 +86,7 @@
 </head>
 <body>
 
-<div id="stage">
+<div id="stage"><!-- height also enforced by fitStage() in JS -->
   <video id="video" autoplay muted playsinline></video>
   <canvas id="overlay"></canvas>
 </div>
@@ -131,6 +131,7 @@
     <label>Toast duration (seconds)</label>
     <input type="number" id="setToastSec" min="2" max="30" step="1" value="6">
   </div>
+  <div id="diag" style="color:var(--muted);font-size:11px;margin-top:14px;font-variant-numeric:tabular-nums"></div>
 </div>
 
 <!-- ============ sightings sheet ============ -->
@@ -158,11 +159,35 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v2.5';
+const APP_VERSION = 'v2.6';
 const $ = id => document.getElementById(id);
 $('appVer').textContent = APP_VERSION;
 const statusEl = $('status');
 const say = msg => { statusEl.textContent = msg; };
+
+// ---- stage sizing: JS fallback for iOS viewport quirks ----
+// If the reported layout viewport is shorter than the physical screen (iOS
+// standalone home-indicator bug), force the stage to physical screen height.
+// On iOS, screen.width/height do NOT rotate: height is always the long side.
+function fitStage() {
+  const portrait = matchMedia('(orientation: portrait)').matches;
+  const target = Math.max(window.innerHeight, portrait ? screen.height : Math.min(screen.width, screen.height));
+  const stage = $('stage');
+  stage.style.height = target + 'px';
+  // diagnostics (visible in Settings)
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;padding-bottom:env(safe-area-inset-bottom,0px);visibility:hidden';
+  document.body.appendChild(probe);
+  const saB = getComputedStyle(probe).paddingBottom;
+  probe.remove();
+  $('diag').textContent =
+    `${APP_VERSION} · viewport ${window.innerWidth}×${window.innerHeight} · screen ${screen.width}×${screen.height}` +
+    ` · stage→${target} · safe-bottom ${saB} · ${navigator.standalone ? 'standalone app' : 'browser tab'}`;
+}
+fitStage();
+addEventListener('resize', fitStage);
+addEventListener('orientationchange', () => setTimeout(fitStage, 300));
+visualViewport?.addEventListener('resize', fitStage);
 const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
 
 // ---------------- settings (persisted) ----------------
