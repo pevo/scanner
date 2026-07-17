@@ -101,7 +101,7 @@
 
 <!-- ============ settings sheet ============ -->
 <div class="sheet" id="settingsSheet">
-  <h2>Settings <button data-close>Done</button></h2>
+  <h2>Settings <span><span id="appVer" style="color:var(--muted);font-size:11px;margin-right:10px"></span><button data-close>Done</button></span></h2>
   <div class="field">
     <label>Ignore repeat sightings of the same plate within (minutes)</label>
     <input type="number" id="setDedupMin" min="0" step="1" value="60">
@@ -149,7 +149,9 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
+const APP_VERSION = 'v2.3';
 const $ = id => document.getElementById(id);
+$('appVer').textContent = APP_VERSION;
 const statusEl = $('status');
 const say = msg => { statusEl.textContent = msg; };
 const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); };
@@ -180,9 +182,9 @@ $('listBtn').onclick = async () => { $('settingsSheet').classList.remove('open')
 
 // ---------------- IndexedDB ----------------
 // v1: 'sightings' {id, plate, ts, lat, lon, accuracy}   v2: + color field, + 'plates' store {plate, note}
-function openDb() {
+function openDbAt(version) {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('alpr', 2);
+    const req = version ? indexedDB.open('alpr', version) : indexedDB.open('alpr');
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('sightings')) {
@@ -194,11 +196,27 @@ function openDb() {
         db.createObjectStore('plates', { keyPath: 'plate' });
       }
     };
+    req.onblocked = () => reject(new Error(
+      'Database upgrade blocked by another open copy of this app. Fully close other tabs/instances (on iPhone: swipe the app away in the app switcher), then reopen.'));
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
   });
 }
+async function openDb() {
+  // Open at whatever version exists (never blocks), then self-heal missing
+  // stores with a version bump only if actually needed.
+  let db = await openDbAt();
+  if (!db.objectStoreNames.contains('sightings') || !db.objectStoreNames.contains('plates')) {
+    const next = db.version + 1;
+    db.close();
+    db = await openDbAt(next);
+  }
+  // never be the instance that blocks a future upgrade
+  db.onversionchange = () => { try { db.close(); } catch {} };
+  return db;
+}
 const dbPromise = openDb();
+dbPromise.catch(e => say('Database error: ' + (e.message || e)));
 
 function tx(store, mode, fn) {
   return dbPromise.then(db => new Promise((resolve, reject) => {
@@ -387,44 +405,71 @@ async function runOcr(frameCanvas, d) {
 }
 
 // ---------------- car color estimate ----------------
-// Samples the body panel directly above the plate (trunk/tailgate area) and
-// majority-votes a coarse color name. Heuristic: lighting and white balance
-// shift results, but it's useful metadata.
+// Samples four body-panel bands around the plate (above/below/left/right),
+// applies gray-world white balance estimated from the FULL frame (kills the
+// blue cast of shade/sky-lit scenes), and requires substantial absolute
+// chroma before calling a hue — otherwise classifies by median brightness.
+// Constants tuned against the test_images set (scratchpad eval_color.py).
 const colorCanvas = document.createElement('canvas');
-function classifyRgb(r, g, b) {
-  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-  const v = mx / 255, s = mx ? (mx - mn) / mx : 0;
-  if (s < 0.18) {
-    if (v > 0.75) return 'white';
-    if (v > 0.45) return 'silver';
-    if (v > 0.18) return 'gray';
-    return 'black';
-  }
-  const d = mx - mn;
-  let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  h *= 60; if (h < 0) h += 360;
-  if (h < 15 || h >= 345) return 'red';
-  if (h < 45) return v < 0.45 ? 'brown' : 'orange';
-  if (h < 70) return 'yellow';
-  if (h < 170) return 'green';
-  if (h < 260) return 'blue';
-  return 'purple';
+const wbCanvas = document.createElement('canvas');
+const HUE_LIMITS = [[15, 'red'], [45, 'orange'], [70, 'yellow'], [170, 'green'], [260, 'blue'], [345, 'purple'], [361, 'red']];
+
+function wbGains(frameCanvas) {
+  wbCanvas.width = 32; wbCanvas.height = 32;
+  const ctx = wbCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(frameCanvas, 0, 0, 32, 32);
+  const { data: px } = ctx.getImageData(0, 0, 32, 32);
+  let r = 0, g = 0, b = 0;
+  for (let i = 0; i < 1024; i++) { r += px[i * 4]; g += px[i * 4 + 1]; b += px[i * 4 + 2]; }
+  r /= 1024; g /= 1024; b /= 1024;
+  const gray = (r + g + b) / 3;
+  const clamp = x => Math.min(1.5, Math.max(0.7, gray / (x + 1e-6)));
+  return [clamp(r), clamp(g), clamp(b)];
 }
+
 function estimateCarColor(frameCanvas, d) {
   const pw = d.x2 - d.x1, ph = d.y2 - d.y1;
-  const x1 = Math.max(0, d.x1 - pw * 0.35), x2 = Math.min(frameCanvas.width, d.x2 + pw * 0.35);
-  const y1 = Math.max(0, d.y1 - ph * 2.2), y2 = Math.max(0, d.y1 - ph * 0.4);
-  if (x2 - x1 < 8 || y2 - y1 < 4) return null;
-  colorCanvas.width = 48; colorCanvas.height = 24;
+  const gains = wbGains(frameCanvas);
+  const bands = [
+    [d.x1 - pw * 0.15, d.y1 - ph * 2.0, d.x2 + pw * 0.15, d.y1 - ph * 0.4],   // body above plate
+    [d.x1 - pw * 0.15, d.y2 + ph * 0.3, d.x2 + pw * 0.15, d.y2 + ph * 1.5],   // bumper below
+    [d.x1 - pw * 0.85, d.y1 - ph * 0.5, d.x1 - pw * 0.10, d.y2 + ph * 0.5],   // body left
+    [d.x2 + pw * 0.10, d.y1 - ph * 0.5, d.x2 + pw * 0.85, d.y2 + ph * 0.5],   // body right
+  ];
+  colorCanvas.width = 32; colorCanvas.height = 12;
   const ctx = colorCanvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(frameCanvas, x1, y1, x2 - x1, y2 - y1, 0, 0, 48, 24);
-  const { data: px } = ctx.getImageData(0, 0, 48, 24);
-  const votes = {};
-  for (let i = 0; i < 48 * 24; i++) {
-    const name = classifyRgb(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
-    votes[name] = (votes[name] || 0) + 1;
+  const hueW = {}, hueN = {};
+  const achro = [];
+  for (const [bx1, by1, bx2, by2] of bands) {
+    const x1 = Math.max(0, bx1), y1 = Math.max(0, by1);
+    const x2 = Math.min(frameCanvas.width, bx2), y2 = Math.min(frameCanvas.height, by2);
+    if (x2 - x1 < 8 || y2 - y1 < 4) continue;
+    ctx.drawImage(frameCanvas, x1, y1, x2 - x1, y2 - y1, 0, 0, 32, 12);
+    const { data: px } = ctx.getImageData(0, 0, 32, 12);
+    for (let i = 0; i < 32 * 12; i++) {
+      const r = Math.min(255, px[i * 4] * gains[0]);
+      const g = Math.min(255, px[i * 4 + 1] * gains[1]);
+      const b = Math.min(255, px[i * 4 + 2] * gains[2]);
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      const v = mx / 255, chroma = mx - mn, s = mx ? chroma / mx : 0;
+      if (v > 0.96 && chroma < 40) continue;              // specular highlight
+      if (chroma < 34 || s < 0.25) { achro.push(v); continue; }
+      let h = mx === r ? ((g - b) / chroma) % 6 : mx === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4;
+      h *= 60; if (h < 0) h += 360;
+      const name = HUE_LIMITS.find(([lim]) => h < lim)[1];
+      hueW[name] = (hueW[name] || 0) + 1 + chroma / 64;   // weight vivid pixels more
+      hueN[name] = (hueN[name] || 0) + 1;
+    }
   }
-  return Object.entries(votes).sort((a, b) => b[1] - a[1])[0][0];
+  const colored = Object.values(hueN).reduce((a, x) => a + x, 0);
+  const total = colored + achro.length;
+  if (!total) return null;
+  if (colored >= 0.30 * total) {
+    return Object.entries(hueW).sort((a, b) => b[1] - a[1])[0][0];
+  }
+  achro.sort((a, b) => a - b);
+  const vm = achro[achro.length >> 1];
+  return vm < 0.32 ? 'black' : vm < 0.58 ? 'gray' : vm < 0.82 ? 'silver' : 'white';
 }
 
 // ---------------- sighting logic ----------------
@@ -582,6 +627,13 @@ document.addEventListener('visibilitychange', async () => {
 // ---------------- sightings list ----------------
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 async function renderList() {
+  try {
+    await renderListInner();
+  } catch (e) {
+    $('listWrap').innerHTML = `<div style="color:var(--err)">Could not load sightings: ${esc(e.message || e)}</div>`;
+  }
+}
+async function renderListInner() {
   const [rows, notes] = await Promise.all([getRecent(100), getAllNotes()]);
   $('dbCount').textContent = `${await countAll()} total`;
   $('listWrap').innerHTML = rows.length
@@ -688,7 +740,7 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
 
-say('Tap Start to load models and open the camera.');
+say(`Tap Start to load models and open the camera. (${APP_VERSION})`);
 </script>
 </body>
 </html>
