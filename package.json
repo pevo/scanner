@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@litertjs/core": "^2.5.2",
+    "playwright": "^1.61.1"
+  }
+}

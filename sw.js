@@ -1,6 +1,7 @@
 // Plate Scanner service worker: offline-first for models/runtime, network-first for pages.
-const CACHE = 'alpr-v11';
-const SHELL = ['./index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = 'alpr-v13';
+const SHELL = ['./index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
+               './geocode-us.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

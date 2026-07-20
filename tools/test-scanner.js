@@ -67,6 +67,12 @@ async function waitToast(page, re, timeoutMs = 120000) {
   check('A: "new plate" toast shown', /new plate logged/.test(t), JSON.stringify(t.slice(0, 80)));
   const palette = ['white', 'silver', 'gray', 'black', 'red', 'orange', 'brown', 'yellow', 'green', 'blue', 'purple'];
   check('A: car color estimated', palette.includes(rows[0]?.color), `color=${rows[0]?.color}`);
+  // feature 3: a plate-crop JPEG is captured & stored for the new sighting
+  const img = await page.evaluate(id => window.alprDb.getImage(id).then(b => b && { size: b.size, type: b.type }), rows[0]?.id);
+  check('A: plate-crop image stored', !!img && img.size > 0 && img.type === 'image/jpeg', `img=${JSON.stringify(img)}`);
+  // feature 0: schema version is stamped in the DB
+  const sv = await page.evaluate(() => window.alprDb.getMeta('schemaVersion'));
+  check('A: DB schema version stamped', sv === 3, `schemaVersion=${sv}`);
   // keep scanning a few more seconds: no duplicate rows may appear (dedup 60 min)
   await page.waitForTimeout(4000);
   rows = await dbRows(page);

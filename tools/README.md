@@ -29,12 +29,15 @@ The browser tests expect the workspace served at `http://localhost:8123`
 | `plate_harness.py` | Runs the full two-stage pipeline (detector + OCR tflite) offline on every image in `test_images/`, with a crop-margin sweep. First stop when a plate reads wrong. |
 | `eval_color.py` | Car-color classifier evaluation on the test images, with per-hue chroma debug output. **Mirrors the constants in `index.html` — if you tune here, port the constants back, and vice versa.** Ground truths are in the `TRUTH` dict. |
 | `make_y4m.py` | Builds `fakecam.y4m` (a fake webcam feed) from `test_images/test1.jpg`, used by the browser tests. Regenerate before first test run (~80 MB, not stored). |
+| `build_geocode.py` | Builds `../geocode-us.json` (the ~30k US-city offline reverse-geocoding dataset, parallel arrays, ~1 MB) from the kelvins/US-Cities-Database CSV. Downloads the source unless a local CSV path is passed. Re-run to refresh the dataset. |
 
 ## Browser tests (Playwright, headless)
 
 | Script | What it does |
 |---|---|
-| `test-scanner.js` | End-to-end scanner suite (18 checks): fake camera + fake GPS → detection, OCR, color, DB insert, dedup window, seen-before toasts, notes, CSV import/merge. Run after any change to `index.html`. Needs `fakecam.y4m` (see `make_y4m.py`). |
+| `test-scanner.js` | End-to-end scanner suite: fake camera + fake GPS → detection, OCR, color, DB insert, dedup window, seen-before toasts, notes, CSV import/merge, plus plate-crop image capture + schema-version stamp. Run after any change to `index.html`. Needs `fakecam.y4m` (see `make_y4m.py`). |
+| `test-features.js` | Focused v3.0 feature suite (no camera needed): DB schema versioning, offline reverse-geocode, image store round-trip, versioned-CSV import + locale enrichment, drive-summary popup. Fast; run for quick regression of the data/geo/UI logic. |
+| `test-perf-zoom.js` | v3.1 perf/zoom suite: serves with COOP/COEP headers + fake camera → asserts `crossOriginIsolated` (threaded wasm), digital center-crop zoom crops the working frame and still logs a plate, and `setZoom` clamps. Self-contained Node server on :8124; needs `fakecam.y4m`. |
 | `test-dbheal.js` | IndexedDB migration robustness: legacy v1 DB, half-migrated DB, healthy DB — verifies the app self-heals and never hangs at "Loading…". |
 | `test-alpr.js` | Drives `alpr-demo.html` over all test images and prints detection + OCR results. Optional arg: `node test-alpr.js webgpu` to attempt the WebGPU backend. |
 
