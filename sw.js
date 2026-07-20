@@ -1,5 +1,5 @@
 // Plate Scanner service worker: offline-first for models/runtime, network-first for pages.
-const CACHE = 'alpr-v13';
+const CACHE = 'alpr-v14';
 const SHELL = ['./index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
                './geocode-us.json'];
 

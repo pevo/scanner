@@ -18,6 +18,18 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <title>Plate Scanner</title>
+<!-- Import map so the LOCAL (same-origin) @litertjs/core resolves its bare
+     `@litertjs/wasm-utils` dependency. Without it that import throws and the
+     app silently falls back to the jsdelivr CDN — which breaks the threaded
+     wasm build, whose pthread Worker cannot be constructed from a cross-origin
+     (CDN) script under COEP. Same-origin runtime is required for multi-core. -->
+<script type="importmap">
+{
+  "imports": {
+    "@litertjs/wasm-utils": "./node_modules/@litertjs/wasm-utils/dist/index.js"
+  }
+}
+</script>
 <style>
   :root {
     --bg: #0f1115; --panel: #181b22e6; --border: #2a2f3a;
@@ -212,7 +224,8 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v3.1';
+const APP_VERSION = 'v3.2';
+let rtBuild = '—';            // which LiteRT wasm build actually loaded (threaded/jspi/default/compat)
 const $ = id => document.getElementById(id);
 $('appVer').textContent = APP_VERSION;
 const statusEl = $('status');
@@ -239,7 +252,7 @@ function fitStage() {
     ` · stage→${target} · safe-top ${saT} · safe-bottom ${saB}` +
     ` · screenY ${window.screenY} · vv ${Math.round(visualViewport?.height ?? -1)}` +
     ` · ${navigator.standalone ? 'standalone app' : 'browser tab'}` +
-    ` · threads ${self.crossOriginIsolated ? 'ON' : 'off'}/${navigator.hardwareConcurrency || '?'} cores`;
+    ` · isolated ${self.crossOriginIsolated ? 'yes' : 'no'}/${navigator.hardwareConcurrency || '?'} cores · wasm ${rtBuild}`;
 }
 fitStage();
 addEventListener('resize', fitStage);
@@ -459,13 +472,44 @@ const OCR_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_';
 let detModel = null, detSpec = null;   // {layout, w, h}
 let ocrModel = null, ocrSpec = null;   // {w, h, c, slots}
 
+async function loadRuntime() {
+  // LiteRT ships four wasm builds and only loads the threaded (multi-core) one
+  // when you pass { threads:true } — cross-origin isolation alone is NOT enough.
+  // Pick the fastest the platform allows (threads and jspi are mutually
+  // exclusive): where JSPI exists prefer it so the detector can run on WebGPU;
+  // otherwise, if the page is cross-origin isolated, use the threaded CPU build
+  // (this is the iOS path — no JSPI there, detector is CPU-bound). Each attempt
+  // falls back to the next on failure (e.g. no relaxed-SIMD => no threads).
+  const isolated = self.crossOriginIsolated === true;
+  const override = new URLSearchParams(location.search).get('rt');   // threaded|jspi|default (for testing)
+  let attempts;
+  if (override === 'threaded') attempts = [['threaded', { threads: true }], ['default', undefined]];
+  else if (override === 'jspi') attempts = [['jspi', { jspi: true }], ['default', undefined]];
+  else if (override === 'default') attempts = [['default', undefined]];
+  else {
+    attempts = [];
+    if (hasJspi) attempts.push(['jspi', { jspi: true }]);
+    if (isolated) attempts.push(['threaded', { threads: true }]);
+    attempts.push(['default', undefined]);
+  }
+  let lastErr;
+  for (const [name, opts] of attempts) {
+    try { await loadLiteRt(WASM_PATH, opts); rtBuild = name; return; }
+    catch (e) { lastErr = e; console.warn(`LiteRT "${name}" build failed, trying next:`, e?.message || e); }
+  }
+  throw lastErr || new Error('LiteRT failed to load');
+}
+
 async function loadModels() {
   say('Loading LiteRT runtime…');
-  await loadLiteRt(WASM_PATH, hasJspi ? { jspi: true } : undefined);
+  await loadRuntime();
+  say(`Runtime: ${rtBuild} wasm`);
+  fitStage();   // refresh the diagnostics line now that rtBuild is known
 
   say('Loading detector…');
-  // detector: webgpu only when JSPI exists (readback needs it); OCR always wasm
-  const accels = hasJspi ? ['webgpu', 'wasm'] : ['wasm'];
+  // WebGPU readback needs JSPI, so it's only valid on the jspi build; every
+  // other build (threaded/default/compat) runs the detector on wasm CPU.
+  const accels = rtBuild === 'jspi' ? ['webgpu', 'wasm'] : ['wasm'];
   outer: for (const cand of DET_CANDIDATES) {
     for (const accel of accels) {
       try { detModel = await loadAndCompile(cand, { accelerator: accel }); break outer; } catch {}
@@ -1069,6 +1113,7 @@ window.alprDebug = {
   reverseGeocode, reverseGeocodeSync, loadGeo, showDriveSummary,
   drivePlates, get preDrivePlates() { return preDrivePlates; }, set preDrivePlates(v) { preDrivePlates = v; },
   DATA_SCHEMA_VERSION, settings, setZoom, get lastCrop() { return lastCrop; },
+  get rtBuild() { return rtBuild; },
 };
 
 say(`Tap Start to load models and open the camera. (${APP_VERSION})`);
