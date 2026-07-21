@@ -59,14 +59,16 @@
 
   #toasts { position: fixed; top: calc(var(--safe-top) + 44px);
             left: calc(var(--safe-left) + 12px); right: calc(var(--safe-right) + 12px); z-index: 30;
-            display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
-           border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(8px); font-size: 13px;
-           animation: slidein .25s ease; }
+            display: flex; flex-direction: column; align-items: flex-start; gap: 6px; pointer-events: none; }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+           border-radius: 8px; padding: 6px 9px; backdrop-filter: blur(8px); font-size: 12px;
+           max-width: min(300px, 80vw); animation: slidein .25s ease; }
   .toast.seen { border-left-color: var(--warn); }
   .toast.new  { border-left-color: var(--ok); }
-  .toast b { font-size: 15px; letter-spacing: .06em; }
-  .toast .rows { color: var(--muted); margin-top: 4px; font-size: 12px; }
+  .toast b { font-size: 13px; letter-spacing: .05em; }
+  .toast .rows { color: var(--muted); margin-top: 2px; font-size: 11px; }
+  /* aggregate toast shown when a burst of plates would otherwise flood the screen */
+  .toast.more { border-left-color: var(--muted); color: var(--muted); font-size: 11px; padding: 5px 9px; }
   .toast.fadeout { transition: opacity .4s; opacity: 0; }
   @keyframes slidein { from { transform: translateY(-8px); opacity: 0; } }
 
@@ -93,6 +95,8 @@
   .field input[type=number] { width: 110px; background: #0d0f13; color: var(--text); border: 1px solid var(--border);
                               border-radius: 8px; padding: 8px; font-size: 15px; }
   .field input[type=range] { width: 100%; }
+  .field select { width: 100%; background: #0d0f13; color: var(--text); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 8px; font-size: 15px; }
   .field .val { color: var(--accent); font-weight: 600; }
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   th, td { border-bottom: 1px solid var(--border); padding: 6px 6px; text-align: left; }
@@ -127,6 +131,21 @@
               justify-content: center; background: #000d; padding: 24px; }
   #lightbox.open { display: flex; }
   #lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+
+  #pruneBackdrop { position: fixed; inset: 0; z-index: 65; display: none;
+                   align-items: center; justify-content: center; padding: 20px;
+                   background: #000a; backdrop-filter: blur(4px); }
+  #pruneBackdrop.open { display: flex; }
+  #pruneCard { background: #14171d; border: 1px solid var(--border); border-radius: 16px;
+               padding: 18px; width: 100%; max-width: 380px; max-height: 80%; overflow-y: auto;
+               animation: slidein .2s ease; }
+  #pruneCard h2 { margin: 0 0 12px; font-size: 17px; }
+  .merge { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .merge input { margin-top: 3px; width: 18px; height: 18px; flex: 0 0 auto; }
+  .merge .m-main { font-size: 14px; }
+  .merge .m-main b { letter-spacing: .05em; }
+  .merge .m-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .merge .bad { color: var(--warn); } .merge .good { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -159,6 +178,18 @@
 
 <div id="lightbox"><img alt="plate capture"></div>
 
+<!-- ============ prune / merge-misreads modal ============ -->
+<div id="pruneBackdrop">
+  <div id="pruneCard" role="dialog" aria-modal="true" aria-labelledby="pruneTitle">
+    <h2 id="pruneTitle">Merge misread plates</h2>
+    <div id="pruneBody"></div>
+    <div class="rowbtns">
+      <button id="pruneCancel">Cancel</button>
+      <button id="pruneApply">Merge selected</button>
+    </div>
+  </div>
+</div>
+
 <div id="controls">
   <button id="startBtn">▶ Start</button>
   <button id="settingsBtn">⚙︎</button>
@@ -171,6 +202,16 @@
   <div class="field">
     <label>Ignore repeat sightings of the same plate within (minutes)</label>
     <input type="number" id="setDedupMin" min="0" step="1" value="60">
+  </div>
+  <div class="field">
+    <label>Detector model (accuracy vs. speed) — takes effect next Start</label>
+    <select id="setDetModel">
+      <option value="auto">Automatic (fastest for this device)</option>
+      <option value="float32">Most accurate (float32, slowest)</option>
+      <option value="float16">Accurate (float16)</option>
+      <option value="dynrange">Fast (dynamic-range 8-bit)</option>
+      <option value="int8">Fastest (full 8-bit)</option>
+    </select>
   </div>
   <div class="field">
     <label>Detection score threshold: <span class="val" id="setScoreVal">0.35</span></label>
@@ -195,6 +236,11 @@
   <div class="field">
     <label>Run detector every N camera frames (higher = cooler/less battery, laggier boxes)</label>
     <input type="number" id="setFrameEvery" min="1" max="5" step="1" value="1">
+  </div>
+  <div class="field">
+    <label>Clean up misread plates — find plates likely misread by OCR and merge their
+           sightings into the correct (more-seen) similar plate</label>
+    <button id="pruneBtn" style="width:100%">Scan for misread plates…</button>
   </div>
   <div id="diag" style="color:var(--muted);font-size:11px;margin-top:14px;font-variant-numeric:tabular-nums"></div>
 </div>
@@ -224,8 +270,9 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v3.2';
+const APP_VERSION = 'v3.4';
 let rtBuild = '—';            // which LiteRT wasm build actually loaded (threaded/jspi/default/compat)
+let detFile = '—';            // which detector model actually loaded (int8/dynrange/float16/float32)
 const $ = id => document.getElementById(id);
 $('appVer').textContent = APP_VERSION;
 const statusEl = $('status');
@@ -252,7 +299,7 @@ function fitStage() {
     ` · stage→${target} · safe-top ${saT} · safe-bottom ${saB}` +
     ` · screenY ${window.screenY} · vv ${Math.round(visualViewport?.height ?? -1)}` +
     ` · ${navigator.standalone ? 'standalone app' : 'browser tab'}` +
-    ` · isolated ${self.crossOriginIsolated ? 'yes' : 'no'}/${navigator.hardwareConcurrency || '?'} cores · wasm ${rtBuild}`;
+    ` · isolated ${self.crossOriginIsolated ? 'yes' : 'no'}/${navigator.hardwareConcurrency || '?'} cores · wasm ${rtBuild} · det ${detFile}`;
 }
 fitStage();
 addEventListener('resize', fitStage);
@@ -264,7 +311,7 @@ const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); 
 const SETTINGS_KEY = 'alpr-scanner-settings';
 const settings = Object.assign({
   dedupMin: 60, score: 0.35, ocrConf: 0.5, confirm: 2, toastSec: 6,
-  zoom: 1, frameEvery: 1,
+  zoom: 1, frameEvery: 1, detModel: 'auto',
 }, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 
@@ -278,6 +325,15 @@ $('setScore').oninput = e => { settings.score = +e.target.value; $('setScoreVal'
 $('setOcrConf').oninput = e => { settings.ocrConf = +e.target.value; $('setOcrConfVal').textContent = settings.ocrConf.toFixed(2); saveSettings(); };
 $('setConfirm').onchange = e => { settings.confirm = Math.max(1, +e.target.value || 1); saveSettings(); };
 $('setToastSec').onchange = e => { settings.toastSec = Math.max(2, +e.target.value || 6); saveSettings(); };
+$('setDetModel').value = settings.detModel;
+$('setDetModel').onchange = e => {
+  settings.detModel = e.target.value; saveSettings();
+  // detector is loaded once on the first Start; force a reload so the new choice
+  // applies. If a scan is in progress the change lands on the next Start.
+  modelsReady = false;
+  say(running ? 'Model change applies after you Stop and Start again.'
+              : 'Detector model set — loads on next Start.');
+};
 $('setZoom').value = settings.zoom; $('setZoomVal').textContent = settings.zoom.toFixed(1) + '×';
 $('setFrameEvery').value = settings.frameEvery;
 $('setZoom').oninput = e => { setZoom(+e.target.value); };
@@ -368,9 +424,17 @@ const getByPlate = plate => tx('sightings', 'readonly', st => st.index('plate').
 const getRecent = (limit = 100) => tx('sightings', 'readonly', st => st.getAll())
   .then(rows => rows.sort((a, b) => b.ts - a.ts).slice(0, limit));
 const countAll = () => tx('sightings', 'readonly', st => st.count());
-// distinct plate names currently in the DB (light: index key scan, no row payloads)
-const getPlateSet = () => tx('sightings', 'readonly', st => st.index('plate').getAllKeys())
-  .then(keys => new Set(keys));
+// distinct plate names currently in the DB (light: index KEY scan, no row payloads).
+// NOTE: index.getAllKeys() returns the *primary keys* (the sighting ids), NOT the
+// index keys (plate strings) — using it here made preDrivePlates a set of numbers
+// that never matched the plate strings in drivePlates, so the drive summary always
+// reported 0% seen-before. openKeyCursor() yields cursor.key = the index key = plate.
+const getPlateSet = () => dbPromise.then(db => new Promise((resolve, reject) => {
+  const set = new Set();
+  const req = db.transaction('sightings', 'readonly').objectStore('sightings').index('plate').openKeyCursor();
+  req.onsuccess = () => { const c = req.result; if (c) { set.add(c.key); c.continue(); } else resolve(set); };
+  req.onerror = () => reject(req.error);
+}));
 const clearAll = () => Promise.all(
   ['sightings', 'plates', 'images'].map(s => tx(s, 'readwrite', st => st.clear())));
 const setNote = (plate, note) => tx('plates', 'readwrite',
@@ -380,6 +444,14 @@ const getAllNotes = () => tx('plates', 'readonly', st => st.getAll())
   .then(rows => new Map(rows.map(r => [r.plate, r.note])));
 const putImage = (id, blob) => tx('images', 'readwrite', st => st.put(blob, id));
 const getImage = id => tx('images', 'readonly', st => st.get(id));
+const deleteSighting = id => tx('sightings', 'readwrite', st => st.delete(id));
+const deleteImage = id => tx('images', 'readwrite', st => st.delete(id));
+// re-key a sighting to a different plate, preserving id/ts/gps/color (and its
+// crop image, which is keyed by the unchanged id). Used by the merge-misreads tool.
+const reKeySighting = (id, plate) => tx('sightings', 'readwrite', st => {
+  const g = st.get(id);
+  g.onsuccess = () => { const s = g.result; if (s) { s.plate = plate; st.put(s); } };
+});
 const getMeta = key => tx('meta', 'readonly', st => st.get(key)).then(r => r?.value);
 const setMeta = (key, value) => tx('meta', 'readwrite', st => st.put({ key, value }));
 
@@ -407,7 +479,8 @@ const migrationReady = dbPromise.then(migrateData).catch(e => console.error('mig
 
 // exposed for debugging / automated tests
 window.alprDb = { addSighting, getByPlate, getRecent, countAll, getPlateSet, clearAll,
-  setNote, getNote, getAllNotes, putImage, getImage, getMeta, setMeta, migrationReady };
+  setNote, getNote, getAllNotes, putImage, getImage, deleteSighting, deleteImage, reKeySighting,
+  getMeta, setMeta, migrationReady };
 
 // ---------------- GPS ----------------
 let lastPos = null;   // {lat, lon, accuracy, ts}
@@ -457,16 +530,45 @@ async function reverseGeocode(lat, lon) {
 const fmtDate = ts => new Date(ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 const fmtLoc = s => s.locale ? s.locale
   : (s.lat != null) ? `${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}` : 'no location';
+// Cap how many individual toasts stack at once so a burst of simultaneously
+// scanned plates can't cover the screen. Overflow collapses into a single
+// "+N more plates" counter pinned at the bottom of the stack.
+const MAX_TOASTS = 4;
+let moreEl = null, moreN = 0, moreTimer = null;
+function bumpMore(n) {
+  const box = $('toasts');
+  moreN += n;
+  if (!moreEl) { moreEl = document.createElement('div'); moreEl.className = 'toast more'; }
+  box.appendChild(moreEl);          // keep the counter last in the stack
+  moreEl.textContent = `+${moreN} more plate${moreN > 1 ? 's' : ''} scanned`;
+  clearTimeout(moreTimer);
+  moreTimer = setTimeout(() => { moreEl?.remove(); moreEl = null; moreN = 0; }, settings.toastSec * 1000);
+}
 function toast(kind, title, rows) {
+  const box = $('toasts');
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.innerHTML = `<b>${title}</b>` + (rows?.length ? `<div class="rows">${rows.join('<br>')}</div>` : '');
-  $('toasts').appendChild(el);
-  setTimeout(() => { el.classList.add('fadeout'); setTimeout(() => el.remove(), 450); }, settings.toastSec * 1000);
+  box.insertBefore(el, moreEl);     // new toasts sit above the aggregate counter
+  el._timer = setTimeout(() => { el.classList.add('fadeout'); setTimeout(() => el.remove(), 450); }, settings.toastSec * 1000);
+  // collapse the oldest into the counter once we exceed the cap
+  let live = [...box.querySelectorAll('.toast:not(.more):not(.fadeout)')];
+  while (live.length > MAX_TOASTS) {
+    const old = live.shift();
+    clearTimeout(old._timer);
+    old.remove();
+    bumpMore(1);
+  }
 }
 
 // ---------------- models ----------------
-const DET_CANDIDATES = ['./yolox_plates_s_float16.tflite', './yolox_plates_s_float32.tflite'];
+const DET_ALL = {
+  int8: './yolox_plates_s_int8.tflite',        // int8 compute, float32 I/O — fastest on wasm CPU
+  dynrange: './yolox_plates_s_dynrange.tflite',// weights-only int8, float32 I/O — safe fallback
+  float16: './yolox_plates_s_float16.tflite',
+  float32: './yolox_plates_s_float32.tflite',
+};
+const DET_OVERRIDE = new URLSearchParams(location.search).get('det');   // int8|dynrange|float16|float32
 const OCR_CANDIDATES = ['./cct_s_v2_global_float16.tflite', './cct_s_v2_global_float32.tflite', './cct_s_ocr_float32.tflite'];
 const OCR_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_';
 let detModel = null, detSpec = null;   // {layout, w, h}
@@ -510,9 +612,21 @@ async function loadModels() {
   // WebGPU readback needs JSPI, so it's only valid on the jspi build; every
   // other build (threaded/default/compat) runs the detector on wasm CPU.
   const accels = rtBuild === 'jspi' ? ['webgpu', 'wasm'] : ['wasm'];
-  outer: for (const cand of DET_CANDIDATES) {
+  // On the CPU (wasm) path int8 is the fast pick; on WebGPU the float builds
+  // run best (the webgpu delegate is unreliable for quantized graphs). The user
+  // can override the device-optimal default from Settings (settings.detModel) —
+  // e.g. pick float32 for accuracy since the 8-bit model isn't always best. The
+  // preferred model is tried first, then the rest as fallback if it won't load.
+  const autoOrder = rtBuild === 'jspi'
+    ? ['float16', 'float32', 'int8', 'dynrange']
+    : ['int8', 'dynrange', 'float16', 'float32'];
+  const pref = (DET_OVERRIDE && DET_ALL[DET_OVERRIDE]) ? DET_OVERRIDE
+    : (settings.detModel && settings.detModel !== 'auto' && DET_ALL[settings.detModel]) ? settings.detModel : null;
+  const order = pref ? [pref, ...autoOrder.filter(k => k !== pref)] : autoOrder;
+  const detCands = order.map(k => [k, DET_ALL[k]]);
+  outer: for (const [name, cand] of detCands) {
     for (const accel of accels) {
-      try { detModel = await loadAndCompile(cand, { accelerator: accel }); break outer; } catch {}
+      try { detModel = await loadAndCompile(cand, { accelerator: accel }); detFile = name; break outer; } catch {}
     }
   }
   if (!detModel) throw new Error('No detector model found (yolox_plates_s_*.tflite)');
@@ -748,17 +862,18 @@ async function handleConfirmedPlate(plate, color, cropCanvas) {
 
   // Surface the toast as soon as the row is logged — don't make the user wait
   // on JPEG encoding/storage below.
+  // Toasts are kept compact: the amber (seen) / green (new) left border already
+  // signals which is which, so the wording stays minimal. A single prior sighting
+  // needs no "seen 1× before" caption — only show a count once it's ≥ 2.
   const title = note ? `${plate} — ${note}` : plate;
   if (prior.length > 0) {
     if (now - (recentToast.get(plate) || 0) > 30_000) {
       recentToast.set(plate, now);
-      const rows = prior.slice(0, 3).map(s =>
-        `${fmtDate(s.ts)} — ${fmtLoc(s)}${s.color ? ` — ${s.color}` : ''}`);
-      toast('seen', `${title} · seen ${prior.length}× before${isDup ? ' (within window, not re-logged)' : ''}`, rows);
+      toast('seen', prior.length >= 2 ? `${title} · seen ${prior.length}×` : title, []);
     }
   } else {
     const detail = [color, locale].filter(Boolean).join(' · ');
-    toast('new', `${title} — new plate logged${detail ? ` (${detail})` : ''}`, []);
+    toast('new', title, detail ? [detail] : []);
   }
 
   // store the plate crop after user feedback (feature 3)
@@ -1017,6 +1132,132 @@ $('listWrap').onclick = async e => {
   renderList();
 };
 
+// ---------------- prune / merge misread plates ----------------
+// OCR occasionally misreads a plate by a character or two (O↔0, I↔1, dropped
+// char). Those misreads show up as their own plate with very few sightings,
+// sitting one edit away from the real plate that has many sightings. This tool
+// finds such pairs and merges the misread's sightings into the correct plate.
+//
+// Levenshtein distance (small strings, plain DP — plates are ≤10 chars).
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 1) return 2;            // we only ever care about ≤1
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1]
+        : 1 + Math.min(prev[j], cur[j - 1], prev[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Build the list of proposed merges. A plate is treated as a misread (the
+// "source") when a plate one edit away has strictly more sightings and the
+// source itself is a small minority read — this keeps two legitimately similar
+// plates (e.g. ABC123 vs ABC124, both seen many times) from being merged.
+// many→one is allowed (several misreads of the same plate); chains are not.
+async function computeMerges() {
+  const rows = await getRecent(1e9);
+  const byPlate = new Map();
+  for (const s of rows) { if (!byPlate.has(s.plate)) byPlate.set(s.plate, []); byPlate.get(s.plate).push(s); }
+  const count = p => byPlate.get(p).length;
+  const plates = [...byPlate.keys()].sort((a, b) => count(a) - count(b));   // small (likely misreads) first
+  const dedupMs = settings.dedupMin * 60 * 1000;
+  const sources = new Set(), targets = new Set();
+  const merges = [];
+  for (const p of plates) {
+    if (sources.has(p) || targets.has(p)) continue;
+    let best = null;
+    for (const q of plates) {
+      if (q === p || sources.has(q)) continue;                 // a source can't also be a target
+      if (count(q) <= count(p)) continue;                      // target must be more-seen
+      if (editDistance(p, q) !== 1) continue;
+      if (!best || count(q) > count(best)) best = q;
+    }
+    if (!best) continue;
+    // only merge if the source is a clear minority (a misread), not a rival real plate
+    if (count(p) > Math.max(2, Math.floor(count(best) / 2))) continue;
+    // how many of the source rows would actually move vs. be dropped as
+    // duplicates already covered by the target within the dedup window.
+    const tTimes = byPlate.get(best).map(s => s.ts);
+    let dropped = 0;
+    for (const s of byPlate.get(p)) if (tTimes.some(t => Math.abs(t - s.ts) < dedupMs)) dropped++;
+    merges.push({ from: p, to: best, fromN: count(p), toN: count(best),
+                  moved: count(p) - dropped, dropped });
+    sources.add(p); targets.add(best);
+  }
+  return merges;
+}
+
+// Apply a single merge: re-key each source sighting to the correct plate,
+// EXCEPT rows falling inside the dedup window of an existing target sighting —
+// those are redundant repeat-sightings of the same event and are deleted
+// (matching the "ignore repeat sightings within N minutes" rule). Notes follow
+// the plate if the target has none.
+async function applyMerge(m) {
+  const dedupMs = settings.dedupMin * 60 * 1000;
+  const [fromRows, toRows] = [await getByPlate(m.from), await getByPlate(m.to)];
+  const tTimes = toRows.map(s => s.ts);
+  for (const s of fromRows) {
+    if (tTimes.some(t => Math.abs(t - s.ts) < dedupMs)) {
+      await deleteSighting(s.id); await deleteImage(s.id);     // duplicate within window → drop
+    } else {
+      await reKeySighting(s.id, m.to); tTimes.push(s.ts);      // move to correct plate (keeps crop)
+    }
+  }
+  const [fromNote, toNote] = [await getNote(m.from), await getNote(m.to)];
+  if (fromNote && !toNote) await setNote(m.to, fromNote);
+  await setNote(m.from, '');                                   // clear the misread's note
+}
+
+let pendingMerges = [];
+$('pruneBtn').onclick = async () => {
+  $('pruneBtn').disabled = true;
+  const prev = $('pruneBtn').textContent;
+  $('pruneBtn').textContent = 'Scanning…';
+  try {
+    pendingMerges = await computeMerges();
+    if (!pendingMerges.length) { toast('new', 'No likely misreads found', []); return; }
+    $('pruneBody').innerHTML =
+      `<div style="color:var(--muted);font-size:12px;margin-bottom:10px">` +
+      `Review each suggested merge. Sightings within your ${settings.dedupMin}-minute repeat window are dropped as duplicates rather than added.</div>` +
+      pendingMerges.map((m, i) =>
+        `<label class="merge"><input type="checkbox" data-i="${i}" checked>` +
+        `<div><div class="m-main"><b class="bad">${esc(m.from)}</b> (${m.fromN}) → <b class="good">${esc(m.to)}</b> (${m.toN})</div>` +
+        `<div class="m-sub">${m.moved} sighting${m.moved === 1 ? '' : 's'} moved` +
+        `${m.dropped ? `, ${m.dropped} dropped as duplicate${m.dropped === 1 ? '' : 's'}` : ''}</div></div></label>`
+      ).join('');
+    $('pruneBackdrop').classList.add('open');
+  } catch (e) {
+    toast('seen', 'Scan failed: ' + (e.message || e), []);
+  } finally {
+    $('pruneBtn').disabled = false;
+    $('pruneBtn').textContent = prev;
+  }
+};
+$('pruneCancel').onclick = () => $('pruneBackdrop').classList.remove('open');
+$('pruneBackdrop').onclick = e => { if (e.target === $('pruneBackdrop')) $('pruneBackdrop').classList.remove('open'); };
+$('pruneApply').onclick = async () => {
+  const chosen = [...$('pruneBody').querySelectorAll('input:checked')].map(c => pendingMerges[+c.dataset.i]);
+  $('pruneApply').disabled = true;
+  $('pruneApply').textContent = 'Merging…';
+  let done = 0, moved = 0, dropped = 0;
+  try {
+    for (const m of chosen) { await applyMerge(m); done++; moved += m.moved; dropped += m.dropped; }
+    $('pruneBackdrop').classList.remove('open');
+    toast('new', `Merged ${done} plate${done === 1 ? '' : 's'} · ${moved} moved${dropped ? `, ${dropped} dropped` : ''}`, []);
+    renderList();
+  } catch (e) {
+    toast('seen', 'Merge failed: ' + (e.message || e), []);
+  } finally {
+    $('pruneApply').disabled = false;
+    $('pruneApply').textContent = 'Merge selected';
+  }
+};
+
 // ---------------- CSV export / import ----------------
 const csvField = v => {
   const s = String(v ?? '');
@@ -1105,7 +1346,23 @@ $('clearBtn').onclick = async () => {
 
 // ---------------- service worker ----------------
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  navigator.serviceWorker.register('./sw.js').then(() => {
+    // Cross-origin isolation (needed for threaded wasm) can fail on the FIRST
+    // load when the page isn't yet under the SW's control — the SW injects the
+    // COOP/COEP headers, but only for requests it handles. If we're not isolated
+    // yet, reload ONCE as soon as a controller exists so the isolated headers
+    // apply. sessionStorage guards against a reload loop (if it still can't
+    // isolate — e.g. an OS that won't honor it — we stop and run single-threaded).
+    if (self.crossOriginIsolated) { sessionStorage.removeItem('coiReload'); return; }
+    if (sessionStorage.getItem('coiReload')) return;   // already tried once this session
+    const reloadOnce = () => {
+      if (!navigator.serviceWorker.controller) return;
+      sessionStorage.setItem('coiReload', '1');
+      location.reload();
+    };
+    if (navigator.serviceWorker.controller) reloadOnce();
+    else navigator.serviceWorker.addEventListener('controllerchange', reloadOnce, { once: true });
+  }).catch(() => {});
 }
 
 // exposed for automated tests / debugging (mirrors window.alprDb)
@@ -1113,7 +1370,8 @@ window.alprDebug = {
   reverseGeocode, reverseGeocodeSync, loadGeo, showDriveSummary,
   drivePlates, get preDrivePlates() { return preDrivePlates; }, set preDrivePlates(v) { preDrivePlates = v; },
   DATA_SCHEMA_VERSION, settings, setZoom, get lastCrop() { return lastCrop; },
-  get rtBuild() { return rtBuild; },
+  get rtBuild() { return rtBuild; }, get detFile() { return detFile; },
+  editDistance, computeMerges, applyMerge, toast,
 };
 
 say(`Tap Start to load models and open the camera. (${APP_VERSION})`);
