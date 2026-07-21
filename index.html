@@ -102,8 +102,8 @@
   th, td { border-bottom: 1px solid var(--border); padding: 6px 6px; text-align: left; }
   th { color: var(--muted); font-weight: 600; }
   td.plate { font-weight: 700; letter-spacing: .05em; }
-  .rowbtns { display: flex; gap: 8px; margin-top: 12px; }
-  .rowbtns button { flex: 1; font-size: 13px; padding: 10px; }
+  .rowbtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .rowbtns button { flex: 1 1 40%; font-size: 13px; padding: 10px; }
   #status { position: fixed; bottom: calc(var(--safe-bottom) + 74px);
             left: calc(var(--safe-left) + 12px); right: calc(var(--safe-right) + 12px); z-index: 10;
             text-align: center; font-size: 12px; color: var(--muted); text-shadow: 0 1px 2px #000; }
@@ -132,6 +132,15 @@
   #lightbox.open { display: flex; }
   #lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
 
+  /* startup 3D voxel-logo splash (above the black video, below HUD/controls) */
+  #splash { position: fixed; inset: 0; z-index: 8; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 18px; pointer-events: none;
+            transition: opacity .6s ease; }
+  #splash.hide { opacity: 0; }
+  #splashCanvas { filter: drop-shadow(0 8px 30px #000a); }
+  #splashWord { font-size: 13px; letter-spacing: .32em; text-transform: uppercase;
+                color: var(--muted); text-shadow: 0 1px 3px #000; }
+
   #pruneBackdrop { position: fixed; inset: 0; z-index: 65; display: none;
                    align-items: center; justify-content: center; padding: 20px;
                    background: #000a; backdrop-filter: blur(4px); }
@@ -153,6 +162,15 @@
 <div id="stage"><!-- height also enforced by fitStage() in JS -->
   <video id="video" autoplay muted playsinline></video>
   <canvas id="overlay"></canvas>
+</div>
+
+<!-- startup splash: the app logo built from giant 3D cubes (voxels), gently
+     precessing so its 3D form reads, with oil-slick iridescent shading. Hidden
+     once scanning starts. Rendered by the splash engine near the bottom of the
+     module. -->
+<div id="splash">
+  <canvas id="splashCanvas"></canvas>
+  <div id="splashWord">Plate Scanner</div>
 </div>
 
 <div id="hud">
@@ -251,11 +269,12 @@
   <div style="color:var(--muted);font-size:11px;margin-bottom:8px">Tap a row to add or edit a note for that plate.</div>
   <div id="listWrap">Loading…</div>
   <div class="rowbtns">
-    <button id="importBtn">Import CSV</button>
+    <button id="importBtn">Import</button>
     <button id="exportBtn">Export CSV</button>
+    <button id="exportZipBtn">Export ZIP (+photos)</button>
     <button id="clearBtn" style="color:var(--err)">Delete all</button>
   </div>
-  <input type="file" id="importFile" accept=".csv,text/csv" hidden>
+  <input type="file" id="importFile" accept=".csv,.zip,text/csv,application/zip" hidden>
 </div>
 
 <script type="module">
@@ -270,7 +289,7 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v3.4';
+const APP_VERSION = 'v3.6';
 let rtBuild = '—';            // which LiteRT wasm build actually loaded (threaded/jspi/default/compat)
 let detFile = '—';            // which detector model actually loaded (int8/dynrange/float16/float32)
 const $ = id => document.getElementById(id);
@@ -1050,6 +1069,7 @@ $('startBtn').onclick = async () => {
     say('Opening camera…');
     await startCamera();
     running = true;
+    hideSplash();                     // reveal the live camera behind the splash
     $('startBtn').textContent = '■ Stop';
     $('startBtn').classList.add('stop');
     say('Scanning…');
@@ -1280,22 +1300,190 @@ function parseCsvLine(line) {
   return out;
 }
 
-$('exportBtn').onclick = async () => {
-  const [rows, notes] = await Promise.all([getRecent(1000000), getAllNotes()]);
+// Build the sightings CSV text. `imageNameFor` (optional) returns the in-bundle
+// image path for a row, adding an `image` column — used only by the ZIP export.
+function buildCsv(rows, notes, imageNameFor) {
   // Leading '#' line stamps the schema so a future build knows how to convert
   // this file on import. The parser skips '#' lines, so it stays backward-
   // compatible with readers that only look at the column header.
   const marker = `# alpr-export schema=${DATA_SCHEMA_VERSION} app=${APP_VERSION}\n`;
-  const csv = marker + 'plate,timestamp,iso_date,lat,lon,accuracy_m,color,locale,note\n' + rows.map(s => [
-    s.plate, s.ts, new Date(s.ts).toISOString(), s.lat ?? '', s.lon ?? '',
-    s.accuracy != null ? s.accuracy.toFixed(0) : '', s.color ?? '', s.locale ?? '', notes.get(s.plate) ?? '',
-  ].map(csvField).join(',')).join('\n');
+  const header = 'plate,timestamp,iso_date,lat,lon,accuracy_m,color,locale,note' +
+    (imageNameFor ? ',image' : '') + '\n';
+  const body = rows.map(s => {
+    const cols = [s.plate, s.ts, new Date(s.ts).toISOString(), s.lat ?? '', s.lon ?? '',
+      s.accuracy != null ? s.accuracy.toFixed(0) : '', s.color ?? '', s.locale ?? '', notes.get(s.plate) ?? ''];
+    if (imageNameFor) cols.push(imageNameFor(s) || '');
+    return cols.map(csvField).join(',');
+  }).join('\n');
+  return marker + header + body;
+}
+function download(blob, name) {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = `plates-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+const stamp = () => new Date().toISOString().slice(0, 10);
+
+$('exportBtn').onclick = async () => {
+  const [rows, notes] = await Promise.all([getRecent(1000000), getAllNotes()]);
+  download(new Blob([buildCsv(rows, notes)], { type: 'text/csv' }), `plates-${stamp()}.csv`);
 };
+
+// ---------------- ZIP archive (data + plate photos) ----------------
+// A portable bundle that any OS opens natively: sightings.csv (opens in Excel/
+// Sheets/LibreOffice) + an images/<id>.jpg folder + a README. Written with the
+// STORE method (no compression — JPEGs are already compressed and the CSV is
+// tiny) in pure JS so the offline/CSP-locked app needs no zip dependency. The
+// READER additionally handles DEFLATE (method 8) via DecompressionStream, so a
+// bundle the user edits and re-zips with Windows Explorer / macOS Finder (both
+// compress) still imports.
+const crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = crcTable[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function zipStore(entries) {            // entries: [{name, data: Uint8Array}]
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+  const parts = [], central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name), data = e.data, crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);  // UTF-8 name flag
+    lh.setUint16(8, 0, true); lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint16(10, 0, true); ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true);
+    ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+    ch.setUint16(28, name.length, true); ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((a, x) => a + x.length, 0);
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, entries.length, true); eocd.setUint16(10, entries.length, true);
+  eocd.setUint32(12, cdSize, true); eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(eocd.buffer)], { type: 'application/zip' });
+}
+async function inflateRaw(u8) {
+  if (typeof DecompressionStream === 'undefined')
+    throw new Error('this browser can\'t read compressed zips — re-export or import the CSV directly');
+  const stream = new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function unzip(arrayBuffer) {      // -> { name: Uint8Array }
+  const u8 = new Uint8Array(arrayBuffer), dv = new DataView(arrayBuffer), dec = new TextDecoder();
+  let eo = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 22 - 65536); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eo = i; break; }
+  }
+  if (eo < 0) throw new Error('not a valid zip file');
+  const count = dv.getUint16(eo + 10, true);
+  let p = dv.getUint32(eo + 16, true);
+  const out = {}, jobs = [];
+  for (let i = 0; i < count && dv.getUint32(p, true) === 0x02014b50; i++) {
+    const method = dv.getUint16(p + 10, true), compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    const lho = dv.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    const dataStart = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+    const comp = u8.subarray(dataStart, dataStart + compSize);
+    if (method === 0) out[name] = comp;
+    else if (method === 8) jobs.push(inflateRaw(comp).then(d => { out[name] = d; }));
+    else throw new Error('unsupported zip compression (method ' + method + ')');
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  await Promise.all(jobs);
+  return out;
+}
+
+const ZIP_README =
+  'Plate Scanner export bundle\n' +
+  '===========================\n\n' +
+  'sightings.csv  - one row per sighting (opens in Excel / Google Sheets / LibreOffice).\n' +
+  'images/        - plate crop photos, named <id>.jpg and referenced by the CSV "image" column.\n\n' +
+  'You can edit sightings.csv (add notes, fix a plate, delete rows) and re-import\n' +
+  'this bundle into the app; rows are matched by plate+timestamp so re-importing\n' +
+  'only adds what is missing. Re-zipping with your OS is fine (compression is handled).\n';
+
+$('exportZipBtn').onclick = async () => {
+  const btn = $('exportZipBtn'), prev = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Building…';
+  try {
+    const [rows, notes] = await Promise.all([getRecent(1000000), getAllNotes()]);
+    const entries = [];
+    const haveImage = new Set();
+    for (const s of rows) {
+      const blob = await getImage(s.id).catch(() => null);
+      if (blob) { entries.push({ name: `images/${s.id}.jpg`, data: new Uint8Array(await blob.arrayBuffer()) }); haveImage.add(s.id); }
+    }
+    const csv = buildCsv(rows, notes, s => haveImage.has(s.id) ? `images/${s.id}.jpg` : '');
+    entries.unshift({ name: 'sightings.csv', data: new TextEncoder().encode(csv) });
+    entries.push({ name: 'README.txt', data: new TextEncoder().encode(ZIP_README) });
+    download(zipStore(entries), `plates-${stamp()}.zip`);
+  } catch (e) {
+    toast('seen', 'ZIP export failed: ' + (e.message || e), []);
+  } finally {
+    btn.disabled = false; btn.textContent = prev;
+  }
+};
+
+// ---------------- import (CSV or ZIP) ----------------
+// Shared row importer. `getImageBlob(name)` (optional) resolves a bundle image
+// path to a Blob; when present, rows carrying an `image` column get their crop
+// restored under the freshly-assigned sighting id.
+async function importCsv(text, getImageBlob) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() && !l.startsWith('#'));
+  if (!lines.length) throw new Error('empty file');
+  const header = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
+  const col = name => header.indexOf(name);
+  if (col('plate') < 0) throw new Error('no "plate" column in header');
+
+  const existing = new Set((await getRecent(1000000)).map(s => `${s.plate}|${s.ts}`));
+  const localNotes = await getAllNotes();
+  let added = 0, skipped = 0, bad = 0, notesAdded = 0, imagesAdded = 0;
+  for (const line of lines.slice(1)) {
+    const f = parseCsvLine(line);
+    const get = name => { const i = col(name); return i >= 0 ? f[i]?.trim() : ''; };
+    const plate = get('plate').toUpperCase();
+    const ts = parseInt(get('timestamp'), 10) || Date.parse(get('iso_date'));
+    if (!plate || !Number.isFinite(ts)) { bad++; continue; }
+    if (existing.has(`${plate}|${ts}`)) { skipped++; continue; }
+    existing.add(`${plate}|${ts}`);
+    const lat = parseFloat(get('lat')) || null, lon = parseFloat(get('lon')) || null;
+    // older exports (schema<3) have no locale column — derive it offline so
+    // imported rows show a friendly place too.
+    let locale = get('locale') || null;
+    if (!locale && lat != null && lon != null) locale = await reverseGeocode(lat, lon);
+    const newId = await addSighting({
+      plate, ts, lat, lon,
+      accuracy: parseFloat(get('accuracy_m')) || null, color: get('color') || null, locale,
+    });
+    added++;
+    const note = get('note');
+    if (note && !localNotes.get(plate)) { await setNote(plate, note); localNotes.set(plate, note); notesAdded++; }
+    const imgName = get('image');
+    if (getImageBlob && imgName) {
+      try { const blob = await getImageBlob(imgName); if (blob) { await putImage(newId, blob); imagesAdded++; } }
+      catch (e) { console.warn('image import failed', imgName, e); }
+    }
+  }
+  return { added, skipped, bad, notesAdded, imagesAdded };
+}
 
 $('importBtn').onclick = () => $('importFile').click();
 $('importFile').onchange = async e => {
@@ -1303,37 +1491,21 @@ $('importFile').onchange = async e => {
   e.target.value = '';
   if (!file) return;
   try {
-    const lines = (await file.text()).split(/\r?\n/).filter(l => l.trim() && !l.startsWith('#'));
-    const header = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
-    const col = name => header.indexOf(name);
-    if (col('plate') < 0) throw new Error('no "plate" column in header');
-
-    const existing = new Set((await getRecent(1000000)).map(s => `${s.plate}|${s.ts}`));
-    const localNotes = await getAllNotes();
-    let added = 0, skipped = 0, bad = 0, notesAdded = 0;
-    for (const line of lines.slice(1)) {
-      const f = parseCsvLine(line);
-      const get = name => { const i = col(name); return i >= 0 ? f[i]?.trim() : ''; };
-      const plate = get('plate').toUpperCase();
-      const ts = parseInt(get('timestamp'), 10) || Date.parse(get('iso_date'));
-      if (!plate || !Number.isFinite(ts)) { bad++; continue; }
-      if (existing.has(`${plate}|${ts}`)) { skipped++; continue; }
-      existing.add(`${plate}|${ts}`);
-      const lat = parseFloat(get('lat')) || null, lon = parseFloat(get('lon')) || null;
-      // older exports (schema<3) have no locale column — derive it offline so
-      // imported rows show a friendly place too.
-      let locale = get('locale') || null;
-      if (!locale && lat != null && lon != null) locale = await reverseGeocode(lat, lon);
-      await addSighting({
-        plate, ts, lat, lon,
-        accuracy: parseFloat(get('accuracy_m')) || null, color: get('color') || null, locale,
-      });
-      added++;
-      const note = get('note');
-      if (note && !localNotes.get(plate)) { await setNote(plate, note); localNotes.set(plate, note); notesAdded++; }
+    let text, resolver = null;
+    if (/\.zip$/i.test(file.name) || file.type === 'application/zip') {
+      const files = await unzip(await file.arrayBuffer());
+      const csvName = Object.keys(files).find(n => /(^|\/)sightings\.csv$/i.test(n))
+        || Object.keys(files).find(n => /\.csv$/i.test(n));
+      if (!csvName) throw new Error('no sightings.csv inside the zip');
+      text = new TextDecoder().decode(files[csvName]);
+      resolver = name => { const u8 = files[name] || files[name.replace(/^\.?\//, '')]; return u8 ? new Blob([u8], { type: 'image/jpeg' }) : null; };
+    } else {
+      text = await file.text();
     }
-    toast('new', `Import: ${added} added, ${skipped} duplicates skipped` +
-      (notesAdded ? `, ${notesAdded} notes` : '') + (bad ? `, ${bad} bad rows` : ''), []);
+    const r = await importCsv(text, resolver);
+    toast('new', `Import: ${r.added} added, ${r.skipped} duplicates skipped` +
+      (r.notesAdded ? `, ${r.notesAdded} notes` : '') + (r.imagesAdded ? `, ${r.imagesAdded} photos` : '') +
+      (r.bad ? `, ${r.bad} bad rows` : ''), []);
     renderList();
   } catch (err) {
     toast('seen', 'Import failed: ' + (err.message || err), []);
@@ -1372,7 +1544,203 @@ window.alprDebug = {
   DATA_SCHEMA_VERSION, settings, setZoom, get lastCrop() { return lastCrop; },
   get rtBuild() { return rtBuild; }, get detFile() { return detFile; },
   editDistance, computeMerges, applyMerge, toast,
+  zipStore, unzip, crc32, buildCsv, importCsv,
 };
+
+// ---------------- startup 3D voxel-logo splash ----------------
+// The app logo (a license plate reading "ABC 123" inside viewfinder corners) is
+// built directly on a coarse cell grid — the plate is filled cells, the text is
+// carved out as holes with a 3×5 bitmap font (a rasterised system font is
+// illegible at this pixel size), the corners are drawn as brackets. Each lit
+// cell becomes a small cube. The whole slab precesses (a slow circular tilt)
+// so the 3D form is unmistakable, and each face is shaded with an angle- and
+// position-dependent iridescent ("oil slick") colour that drifts as it turns.
+// Everything is Canvas-2D + a tiny painter's-algorithm voxel renderer
+// (no WebGL/library) so it stays self-contained for the offline PWA.
+const splashEl = $('splash'), splashCanvas = $('splashCanvas');
+const sctx = splashCanvas?.getContext('2d');
+// 8 cube corners, indexed by bits: bit0=+x, bit1=+y, bit2=+z
+const CUBE_FACES = [
+  { idx: [4, 5, 7, 6], n: [0, 0, 1] },   // +z (top toward camera)
+  { idx: [0, 1, 3, 2], n: [0, 0, -1] },  // -z
+  { idx: [1, 3, 7, 5], n: [1, 0, 0] },   // +x
+  { idx: [0, 2, 6, 4], n: [-1, 0, 0] },  // -x
+  { idx: [2, 3, 7, 6], n: [0, 1, 0] },   // +y
+  { idx: [0, 1, 5, 4], n: [0, -1, 0] },  // -y
+];
+const L = [-0.352, 0.554, 0.755];        // light direction (normalised)
+const HALF = [-0.188, 0.296, 0.937];     // half-vector (light + view) for specular
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let splashCubes = [], gridSpan = 0;
+let sCss = 0, scx = 0, scy = 0, sUnit = 0, sFocal = 20;
+let splashRunning = false, splashRaf = 0;
+let curAX = 0.22, curAY = 0;
+
+// 4×6 bitmap font — only the glyphs used by the plate text. Missing chars are
+// blank. Rows are top→bottom, '1' = pixel on (carved as a hole in the plate).
+const FONT4x6 = {
+  'A': ['0110', '1001', '1001', '1111', '1001', '1001'],
+  'B': ['1110', '1001', '1110', '1001', '1001', '1110'],
+  'C': ['0111', '1000', '1000', '1000', '1000', '0111'],
+  '1': ['0100', '1100', '0100', '0100', '0100', '1110'],
+  '2': ['1110', '0001', '0010', '0100', '1000', '1111'],
+  '3': ['1110', '0001', '0110', '0001', '0001', '1110'],
+  ' ': ['0000', '0000', '0000', '0000', '0000', '0000'],
+};
+const GLYPH_W = 4, GLYPH_H = 6;
+const PLATE_TEXT = 'ABC 123';
+
+function buildLogo() {
+  const GW = 52, GH = 52;                  // square field, like the icon
+  const grid = Array.from({ length: GH }, () => new Array(GW).fill(false));
+  const set = (x, y, v) => { if (x >= 0 && x < GW && y >= 0 && y < GH) grid[y][x] = v; };
+  // plate body (rounded: drop the four corner cells), centred in the square
+  const plateW = 40, plateH = 18;
+  const plateX = Math.round((GW - plateW) / 2), plateY = Math.round((GH - plateH) / 2);
+  for (let y = 0; y < plateH; y++) for (let x = 0; x < plateW; x++) {
+    const corner = (x === 0 || x === plateW - 1) && (y === 0 || y === plateH - 1);
+    if (!corner) set(plateX + x, plateY + y, true);
+  }
+  // plate text, carved as holes, centred (glyph advance = GLYPH_W + 1 gap)
+  const adv = GLYPH_W + 1;
+  const tW = PLATE_TEXT.length * adv - 1;
+  const tx = plateX + Math.round((plateW - tW) / 2), ty = plateY + Math.round((plateH - GLYPH_H) / 2);
+  [...PLATE_TEXT].forEach((ch, s) => {
+    const g = FONT4x6[ch] || FONT4x6[' '];
+    for (let r = 0; r < GLYPH_H; r++) for (let c = 0; c < GLYPH_W; c++) if (g[r][c] === '1') set(tx + s * adv + c, ty + r, false);
+  });
+  // viewfinder corner brackets at the corners of the square field (like the icon)
+  const M = 3, arm = 8, th = 2;
+  const corners = [
+    [M, M, 1, 1], [GW - 1 - M, M, -1, 1],
+    [M, GH - 1 - M, 1, -1], [GW - 1 - M, GH - 1 - M, -1, -1],
+  ];
+  for (const [cxp, cyp, dx, dy] of corners) {
+    for (let a = 0; a < arm; a++) for (let t = 0; t < th; t++) {
+      set(cxp + dx * a, cyp + dy * t, true);   // horizontal arm
+      set(cxp + dx * t, cyp + dy * a, true);   // vertical arm
+    }
+    set(cxp, cyp, false);                      // round the bracket: drop the outer corner pixel
+  }
+  // collect lit cells + bounding box
+  const cells = [];
+  let minx = GW, miny = GH, maxx = 0, maxy = 0;
+  for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) if (grid[y][x]) {
+    cells.push([x, y]);
+    if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+  }
+  if (!cells.length) throw new Error('empty logo grid');
+  const ccx = (minx + maxx) / 2, ccy = (miny + maxy) / 2;
+  gridSpan = Math.max(maxx - minx, maxy - miny) + 1;
+  const h = 0.42;                          // cube half-size in cell units (<0.5 => gaps => reads as pixels)
+  splashCubes = cells.map(([x, y]) => {
+    const X = x - ccx, Y = ccy - y;        // flip Y: grid y-down -> world y-up
+    const vs = [];
+    for (const sz of [-h, h]) for (const sy of [-h, h]) for (const sx of [-h, h]) vs.push([X + sx, Y + sy, sz]);
+    return { vs, hueOff: (x * 13 + y * 29) % 360 };
+  });
+  sFocal = gridSpan * 1.4;                  // gentle perspective relative to logo size
+}
+
+function sizeSplash() {
+  if (!splashCanvas || !gridSpan) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  sCss = Math.min(window.innerWidth, window.innerHeight) * 0.9;
+  splashCanvas.style.width = sCss + 'px'; splashCanvas.style.height = sCss + 'px';
+  splashCanvas.width = Math.round(sCss * dpr); splashCanvas.height = Math.round(sCss * dpr);
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scx = sCss / 2; scy = sCss / 2;
+  sUnit = sCss * 0.8 / gridSpan;           // fit with margin for tilt + perspective overhang
+}
+
+function rotMat(ax, ay) {                   // R = Rx(ax) * Ry(ay)
+  const cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay);
+  return [[cy, 0, sy], [sx * sy, cx, -sx * cy], [-cx * sy, sx, cx * cy]];
+}
+
+function drawSplash(t) {
+  if (!sctx || !sUnit) return;
+  const amp = reduceMotion ? 0.1 : 0.20, spd = reduceMotion ? 0.25 : 0.5;
+  const theta = t * spd;
+  const tAX = 0.22 + amp * Math.sin(theta);   // base tilt + circular precession
+  const tAY = amp * Math.cos(theta);
+  curAX += (tAX - curAX) * 0.1; curAY += (tAY - curAY) * 0.1;   // smoothing / inertia
+  const R = rotMat(curAX, curAY);
+  sctx.clearRect(0, 0, sCss, sCss);
+
+  const faces = [];
+  for (const cube of splashCubes) {
+    const P = cube.vs.map(v => [
+      R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2],
+      R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2],
+      R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2],
+    ]);
+    for (const f of CUBE_FACES) {
+      const n = f.n;
+      const nz = R[2][0] * n[0] + R[2][1] * n[1] + R[2][2] * n[2];
+      if (nz <= 0.001) continue;            // back-face cull
+      const nx = R[0][0] * n[0] + R[0][1] * n[1] + R[0][2] * n[2];
+      const ny = R[1][0] * n[0] + R[1][1] * n[1] + R[1][2] * n[2];
+      const pts = []; let zc = 0;
+      for (const i of f.idx) {
+        const p = P[i], persp = sFocal / (sFocal - p[2]);
+        pts.push(scx + p[0] * sUnit * persp, scy - p[1] * sUnit * persp);
+        zc += p[2];
+      }
+      faces.push({ pts, zc: zc / 4, nx, ny, nz, hueOff: cube.hueOff });
+    }
+  }
+  faces.sort((a, b) => a.zc - b.zc);        // painter's: far (small z) first
+
+  for (const fc of faces) {
+    const iri = 0.5 + 0.5 * (fc.nx * 0.7 + fc.ny * 0.3);
+    let hue = (t * 16 + fc.hueOff + iri * 260 + (1 - fc.nz) * 150) % 360; if (hue < 0) hue += 360;
+    const diff = Math.max(0, fc.nx * L[0] + fc.ny * L[1] + fc.nz * L[2]);
+    const lum = 30 + 42 * diff;
+    const p = fc.pts;
+    sctx.beginPath(); sctx.moveTo(p[0], p[1]);
+    sctx.lineTo(p[2], p[3]); sctx.lineTo(p[4], p[5]); sctx.lineTo(p[6], p[7]); sctx.closePath();
+    sctx.fillStyle = `hsl(${hue.toFixed(0)}, 82%, ${lum.toFixed(0)}%)`;
+    sctx.fill();
+    sctx.strokeStyle = 'rgba(0,0,0,0.22)'; sctx.lineWidth = 0.6; sctx.stroke();
+    const s = Math.max(0, fc.nx * HALF[0] + fc.ny * HALF[1] + fc.nz * HALF[2]);
+    const spec = Math.pow(s, 22);
+    if (spec > 0.02) { sctx.globalAlpha = Math.min(0.7, spec * 0.7); sctx.fillStyle = '#fff'; sctx.fill(); sctx.globalAlpha = 1; }
+  }
+}
+
+function splashFrame(now) {
+  if (!splashRunning) return;
+  drawSplash(now / 1000);
+  splashRaf = requestAnimationFrame(splashFrame);
+}
+function hideSplash() {
+  if (!splashEl || splashEl.classList.contains('hide')) return;
+  splashEl.classList.add('hide');
+  splashRunning = false;
+  cancelAnimationFrame(splashRaf);
+}
+
+function initSplash() {
+  if (!splashCanvas) return;
+  try { buildLogo(); }
+  catch (e) { console.warn('splash logo unavailable:', e?.message || e); splashEl.style.display = 'none'; return; }
+  sizeSplash();
+  addEventListener('resize', sizeSplash);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) cancelAnimationFrame(splashRaf);
+    else if (splashRunning) splashRaf = requestAnimationFrame(splashFrame);
+  });
+  splashRunning = true;
+  splashRaf = requestAnimationFrame(splashFrame);
+}
+window.alprDebug.splash = {
+  initSplash, hideSplash, buildLogo, drawSplash, sizeSplash,
+  get cubeCount() { return splashCubes.length; },
+  get running() { return splashRunning; },
+};
+initSplash();
 
 say(`Tap Start to load models and open the camera. (${APP_VERSION})`);
 </script>
