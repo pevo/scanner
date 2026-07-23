@@ -47,7 +47,12 @@
   #stage { position: fixed; top: 0; left: 0; width: 100vw; width: 100lvw;
            height: 100vh; height: 100lvh; background: #000; }
   #video { width: 100%; height: 100%; object-fit: cover; }
+  #frozen { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+            background: #000; display: none; }
   #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  /* power-saver: hide the live video (stops its compositing) and show frames */
+  #stage.eco #video { visibility: hidden; }
+  #stage.eco #frozen { display: block; }
 
   #hud { position: fixed; top: 0; left: 0; right: 0;
          padding: calc(var(--safe-top) + 8px) calc(var(--safe-right) + 12px) 8px calc(var(--safe-left) + 12px);
@@ -80,7 +85,8 @@
            backdrop-filter: blur(8px); }
   #startBtn { flex: 2; background: var(--accent); color: #06213c; border: 0; }
   #startBtn.stop { background: var(--err); color: #fff; }
-  #settingsBtn, #listBtn { flex: 1; }
+  #ecoBtn, #settingsBtn, #listBtn { flex: 1; }
+  #ecoBtn.on { background: var(--ok); color: #06213c; border-color: var(--ok); }
 
   .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; max-height: 75%;
            background: #14171d; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0;
@@ -161,6 +167,11 @@
 
 <div id="stage"><!-- height also enforced by fitStage() in JS -->
   <video id="video" autoplay muted playsinline></video>
+  <!-- power-saver mode paints the latest captured frame here and hides the live
+       <video>, so the display stops compositing 30fps of camera and the scan
+       loop can idle between grabs (less heat). object-fit mirrors #video so the
+       overlay boxes line up identically. -->
+  <canvas id="frozen"></canvas>
   <canvas id="overlay"></canvas>
 </div>
 
@@ -210,6 +221,7 @@
 
 <div id="controls">
   <button id="startBtn">▶ Start</button>
+  <button id="ecoBtn" title="Power saver: freeze the live preview and scan slowly to reduce heat">❄</button>
   <button id="settingsBtn">⚙︎</button>
   <button id="listBtn">☰</button>
 </div>
@@ -256,6 +268,14 @@
     <input type="number" id="setFrameEvery" min="1" max="5" step="1" value="1">
   </div>
   <div class="field">
+    <label><input type="checkbox" id="setEco" style="width:auto;margin-right:8px;vertical-align:middle">
+      Power saver (freeze live preview, scan slowly to reduce heat)</label>
+  </div>
+  <div class="field">
+    <label>Power-saver scan interval (seconds between captures)</label>
+    <input type="number" id="setEcoSec" min="0.5" max="10" step="0.5" value="1">
+  </div>
+  <div class="field">
     <label>Clean up misread plates — find plates likely misread by OCR and merge their
            sightings into the correct (more-seen) similar plate</label>
     <button id="pruneBtn" style="width:100%">Scan for misread plates…</button>
@@ -289,7 +309,7 @@ try {
 }
 const hasJspi = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
 
-const APP_VERSION = 'v3.6';
+const APP_VERSION = 'v3.7';
 let rtBuild = '—';            // which LiteRT wasm build actually loaded (threaded/jspi/default/compat)
 let detFile = '—';            // which detector model actually loaded (int8/dynrange/float16/float32)
 const $ = id => document.getElementById(id);
@@ -330,7 +350,7 @@ const setDot = (id, cls) => { $(id).className = 'dot' + (cls ? ' ' + cls : ''); 
 const SETTINGS_KEY = 'alpr-scanner-settings';
 const settings = Object.assign({
   dedupMin: 60, score: 0.35, ocrConf: 0.5, confirm: 2, toastSec: 6,
-  zoom: 1, frameEvery: 1, detModel: 'auto',
+  zoom: 1, frameEvery: 1, detModel: 'auto', eco: false, ecoSec: 1,
 }, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 
@@ -357,6 +377,27 @@ $('setZoom').value = settings.zoom; $('setZoomVal').textContent = settings.zoom.
 $('setFrameEvery').value = settings.frameEvery;
 $('setZoom').oninput = e => { setZoom(+e.target.value); };
 $('setFrameEvery').onchange = e => { settings.frameEvery = Math.min(5, Math.max(1, +e.target.value || 1)); saveSettings(); };
+$('setEco').checked = settings.eco;
+$('setEcoSec').value = settings.ecoSec;
+$('setEco').onchange = e => setEco(e.target.checked);
+$('setEcoSec').onchange = e => { settings.ecoSec = Math.min(10, Math.max(0.5, +e.target.value || 1)); saveSettings(); };
+// power-saver: freeze the live preview (show captured stills) and idle the scan
+// loop between grabs so the phone runs cooler. Shared by the on-screen ❄ button
+// and the Settings checkbox; takes effect immediately, even mid-scan.
+function setEco(on) {
+  settings.eco = !!on;
+  saveSettings();
+  $('stage').classList.toggle('eco', settings.eco);
+  $('setEco').checked = settings.eco;
+  $('ecoBtn').classList.toggle('on', settings.eco);
+  if (!settings.eco) { const f = $('frozen'); f.getContext('2d')?.clearRect(0, 0, f.width, f.height); }
+  if (running) say(settings.eco ? 'Power saver on — preview frozen, scanning slowly.' : 'Power saver off — live preview.');
+}
+$('ecoBtn').onclick = () => setEco(!settings.eco);
+// apply persisted state at startup (can't call setEco yet — it reads `running`,
+// which is declared later; just set the visual state here)
+$('stage').classList.toggle('eco', settings.eco);
+$('ecoBtn').classList.toggle('on', settings.eco);
 // central zoom setter shared by the slider and the pinch gesture
 function setZoom(z) {
   settings.zoom = Math.min(8, Math.max(1, Math.round(z * 2) / 2));
@@ -935,6 +976,18 @@ function stopCamera() {
   setDot('dotCam', '');
 }
 
+// power-saver: paint the current camera frame into #frozen so the (hidden) live
+// video is replaced by the last captured still. Matches #video's native size +
+// object-fit:cover so the overlay boxes stay aligned exactly as in live mode.
+const frozen = $('frozen');
+function drawFrozen() {
+  const vW = video.videoWidth, vH = video.videoHeight;
+  if (!vW || !vH) return;
+  if (frozen.width !== vW) frozen.width = vW;
+  if (frozen.height !== vH) frozen.height = vH;
+  try { frozen.getContext('2d').drawImage(video, 0, 0, vW, vH); } catch {}
+}
+
 function drawOverlay(dets) {
   const lc = lastCrop;
   overlay.width = lc.vW || video.videoWidth; overlay.height = lc.vH || video.videoHeight;
@@ -975,11 +1028,13 @@ async function scanLoop() {
     const cx0 = Math.round((vW - cropW) / 2), cy0 = Math.round((vH - cropH) / 2);
     lastCrop = { cx0, cy0, cropW, cropH, vW, vH };
 
+    const eco = settings.eco;
     // frame-skip: run the (expensive) detector only every Nth camera frame;
     // between runs keep the last boxes on the overlay. Cuts sustained CPU
     // load/heat, which on a thermally-throttling phone can raise the effective
-    // frame rate of the frames that DO run.
-    if ((frameCount++ % Math.max(1, settings.frameEvery | 0)) !== 0) {
+    // frame rate of the frames that DO run. (Skipped in power-saver mode, which
+    // instead processes one frame then idles for ecoSec.)
+    if (!eco && (frameCount++ % Math.max(1, settings.frameEvery | 0)) !== 0) {
       drawOverlay(lastDets);
       await new Promise(r => setTimeout(r, 0));
       continue;
@@ -1012,10 +1067,13 @@ async function scanLoop() {
     for (const key of confirmCounts.keys()) if (!seenThisFrame.has(key)) confirmCounts.delete(key);
 
     lastDets = dets;
+    if (eco) drawFrozen();          // show this captured frame while the live video is hidden
     drawOverlay(dets);
     const ms = performance.now() - t0;
-    $('perf').textContent = `${ms.toFixed(0)} ms/frame${Z > 1 ? ` · ${Z}×` : ''}`;
-    await new Promise(r => setTimeout(r, 0));   // yield to UI
+    $('perf').textContent = `${ms.toFixed(0)} ms/frame${Z > 1 ? ` · ${Z}×` : ''}${eco ? ' · eco' : ''}`;
+    // power-saver idles between captures to cut sustained load/heat; live mode
+    // just yields to the UI and grabs the next frame.
+    await new Promise(r => setTimeout(r, eco ? Math.max(300, settings.ecoSec * 1000) : 0));
   }
   lastDets = [];
   drawOverlay([]);

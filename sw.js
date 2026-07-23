@@ -6,7 +6,7 @@
 // SharedArrayBuffer (and thus multi-threaded wasm) stays disabled. Re-stamping
 // the headers here guarantees isolation regardless of the server or the cache
 // (the well-known "coi-serviceworker" technique).
-const CACHE = 'alpr-v17';
+const CACHE = 'alpr-v20';
 const SHELL = ['./index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
                './geocode-us.json'];
 
